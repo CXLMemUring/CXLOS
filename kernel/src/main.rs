@@ -35,6 +35,8 @@ mod irq;
 mod mem;
 mod metrics;
 mod shell;
+mod busybox;
+mod fs;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -182,6 +184,9 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
 
         // initialize the virtual memory subsystem
         mem::init(boot_info, &mut rng, frame_alloc).unwrap();
+
+        // initialize the filesystem
+        fs::init().unwrap();
 
         // perform LATE per-cpu, architecture-specific initialization
         // (e.g. setting the trap vector and enabling interrupts)

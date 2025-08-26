@@ -30,6 +30,7 @@ use crate::device_tree::DeviceTree;
 use crate::mem::{Mmap, PhysicalAddress, with_kernel_aspace};
 use crate::state::global;
 use crate::{arch, irq};
+use crate::busybox::{self, commands};
 
 static COMMANDS: &[Command] = &[PANIC, FAULT, VERSION, SHUTDOWN];
 
@@ -255,7 +256,38 @@ pub fn eval(line: &str) {
         tracing::info!(target: "shell", "available commands:");
         print_help("", COMMANDS);
         tracing::info!(target: "shell", "");
+        tracing::info!(target: "shell", "BusyBox commands:");
+        tracing::info!(target: "shell", "  busybox --- list all busybox commands");
+        tracing::info!(target: "shell", "  or run any busybox command directly (e.g., echo, pwd, uname)");
         return;
+    }
+
+    if line == "busybox" {
+        tracing::info!(target: "shell", "BusyBox v1.36.1 commands:");
+        for cmd in busybox::BUSYBOX_COMMANDS {
+            tracing::info!(target: "shell", "  {} --- {}", cmd.name, cmd.description);
+        }
+        return;
+    }
+
+    // Try to handle as a busybox command first
+    let parts: alloc::vec::Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
+    if !parts.is_empty() {
+        if let Some(impl_fn) = commands::get_command_impl(&parts[0]) {
+            let mut ctx = commands::CommandContext::new(parts);
+            match impl_fn.execute(&mut ctx) {
+                Ok(output) => {
+                    if !output.is_empty() {
+                        tracing::info!(target: "shell", "{}", output.trim_end());
+                    }
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(target: "shell", "{}: {}", ctx.args[0], e);
+                    return;
+                }
+            }
+        }
     }
 
     match handle_command(Context::new(line), COMMANDS) {
