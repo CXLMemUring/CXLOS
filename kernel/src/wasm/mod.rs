@@ -16,7 +16,7 @@ mod func;
 mod global;
 mod indices;
 mod instance;
-mod linker;
+pub mod linker;
 mod memory;
 mod module;
 mod store;
@@ -30,6 +30,13 @@ mod types;
 mod utils;
 mod values;
 mod vm;
+pub mod host_fs;
+/// Internal default instance allocator suitable for bootstrapping.
+static PLACEHOLDER_ALLOC: vm::instance_alloc::PlaceholderAllocatorDontUse = vm::instance_alloc::PlaceholderAllocatorDontUse;
+
+pub fn default_instance_allocator() -> &'static (vm::InstanceAllocator + Send + Sync) {
+    &PLACEHOLDER_ALLOC
+}
 
 pub use engine::Engine;
 pub use func::Func;
@@ -45,8 +52,9 @@ pub use tag::Tag;
 pub use trap::TrapKind;
 #[cfg(test)]
 pub use values::Val;
+pub use vm::ConstExprEvaluator;
 #[cfg(test)]
-pub use vm::{ConstExprEvaluator, PlaceholderAllocatorDontUse};
+pub use vm::PlaceholderAllocatorDontUse;
 
 use crate::wasm::store::StoreOpaque;
 use crate::wasm::utils::{enum_accessors, owned_enum_accessors};

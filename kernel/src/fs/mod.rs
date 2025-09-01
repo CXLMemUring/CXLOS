@@ -18,25 +18,26 @@ pub fn init() -> crate::Result<()> {
     let mut vfs_guard = VFS.write();
     let mut vfs = VirtualFileSystem::new();
     
-    // Create basic directory structure
-    // vfs.mkdir("/bin")?;
-    // vfs.mkdir("/dev")?;
-    // vfs.mkdir("/etc")?;
-    // vfs.mkdir("/home")?;
-    // vfs.mkdir("/lib")?;
-    // vfs.mkdir("/proc")?;
-    // vfs.mkdir("/sys")?;
-    // vfs.mkdir("/tmp")?;
-    // vfs.mkdir("/usr")?;
-    // vfs.mkdir("/var")?;
+    // Test with minimal initialization first
+    tracing::debug!("Testing minimal filesystem initialization");
+
+    vfs.mkdir("/bin")?;
+    vfs.mkdir("/dev")?;
+    vfs.mkdir("/etc")?;
+    vfs.mkdir("/home")?;
+    vfs.mkdir("/lib")?;
+    vfs.mkdir("/proc")?;
+    vfs.mkdir("/sys")?;
+    vfs.mkdir("/tmp")?;
+    vfs.mkdir("/usr")?;
+    vfs.mkdir("/var")?;
 
     // Create some basic files
-    // vfs.create_file("/etc/hostname", b"k23\n")?;
-    // vfs.create_file("/etc/passwd", b"root:x:0:0:root:/root:/bin/sh\n")?;
-    // vfs.create_file("/etc/group", b"root:x:0:root\n")?;
-    // vfs.create_file("/proc/version", b"k23 version 0.1.0\n")?;
-    // vfs.create_file("/proc/cmdline", b"console=ttyS0\n")?;
-    
+    vfs.create_file("/etc/hostname", b"k23\n")?;
+    vfs.create_file("/etc/passwd", b"root:x:0:0:root:/root:/bin/sh\n")?;
+    vfs.create_file("/etc/group", b"root:x:0:root\n")?;
+    vfs.create_file("/proc/version", b"k23 version 0.1.0\n")?;
+    vfs.create_file("/proc/cmdline", b"console=ttyS0\n")?;
     *vfs_guard = Some(vfs);
     
     tracing::info!("Filesystem initialized");

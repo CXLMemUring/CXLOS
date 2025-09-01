@@ -188,6 +188,13 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         // initialize the filesystem
         fs::init().unwrap();
 
+        // Optionally initialize WASM BusyBox (requires prebuilt wasm + feature flag)
+        if let Ok(true) = busybox::wasm_loader::try_init_wasm_busybox() {
+            tracing::info!("Initialized WASM BusyBox module");
+        } else {
+            tracing::warn!("WASM BusyBox module not initialized");
+        }
+
         // perform LATE per-cpu, architecture-specific initialization
         // (e.g. setting the trap vector and enabling interrupts)
         let cpu = arch::device::cpu::Cpu::new(&device_tree, cpuid)?;

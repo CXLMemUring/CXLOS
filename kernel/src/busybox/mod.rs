@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 pub mod commands;
+pub mod wasm_loader;
 
 #[derive(Debug, Clone)]
 pub struct BusyboxCommand {

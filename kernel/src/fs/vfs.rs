@@ -1,6 +1,5 @@
 use super::FsError;
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
@@ -30,7 +29,10 @@ pub struct FileNode {
     pub name: String,
     pub file_type: FileType,
     pub data: Vec<u8>,
-    pub children: BTreeMap<String, Box<FileNode>>,
+    // Use a simple Vec-based map to reduce allocator complexity during bootstrap.
+    // This avoids deeper BTreeMap node allocations which may trigger OOM/fragmentation
+    // on early boot in constrained environments.
+    pub children: Vec<(String, Box<FileNode>)>,
     pub stat: FileStat,
 }
 
@@ -41,7 +43,7 @@ impl FileNode {
             name,
             file_type: FileType::Directory,
             data: Vec::new(),
-            children: BTreeMap::new(),
+            children: Vec::new(),
             stat: FileStat {
                 size: 0,
                 file_type: FileType::Directory,
@@ -59,7 +61,7 @@ impl FileNode {
             name,
             file_type: FileType::Regular,
             data,
-            children: BTreeMap::new(),
+            children: Vec::new(),
             stat: FileStat {
                 size,
                 file_type: FileType::Regular,
@@ -112,10 +114,16 @@ impl VirtualFileSystem {
             if current.file_type != FileType::Directory {
                 return Err(FsError::NotDirectory);
             }
-            current = current
-                .children
-                .get(&component)
-                .ok_or(FsError::NotFound)?;
+
+            // linear search over children
+            let mut next: Option<&FileNode> = None;
+            for (name, child) in &current.children {
+                if name == &component {
+                    next = Some(child);
+                    break;
+                }
+            }
+            current = next.ok_or(FsError::NotFound)?;
         }
 
         Ok(current)
@@ -134,10 +142,16 @@ impl VirtualFileSystem {
             if current.file_type != FileType::Directory {
                 return Err(FsError::NotDirectory);
             }
-            current = current
-                .children
-                .get_mut(&component)
-                .ok_or(FsError::NotFound)?;
+
+            // linear search over children (mutable)
+            let mut next: Option<&mut FileNode> = None;
+            for (name, child) in &mut current.children {
+                if name == &component {
+                    next = Some(child);
+                    break;
+                }
+            }
+            current = next.ok_or(FsError::NotFound)?;
         }
 
         Ok(current)
@@ -158,10 +172,16 @@ impl VirtualFileSystem {
             if current.file_type != FileType::Directory {
                 return Err(FsError::NotDirectory);
             }
-            current = current
-                .children
-                .get_mut(component)
-                .ok_or(FsError::NotFound)?;
+
+            // linear search over children (mutable)
+            let mut next: Option<&mut FileNode> = None;
+            for (name, child) in &mut current.children {
+                if name == component {
+                    next = Some(child);
+                    break;
+                }
+            }
+            current = next.ok_or(FsError::NotFound)?;
         }
 
         Ok((current, filename))
@@ -171,13 +191,13 @@ impl VirtualFileSystem {
     pub fn mkdir(&mut self, path: &str) -> Result<(), FsError> {
         let (parent, dirname) = self.navigate_to_parent_mut(path)?;
 
-        if parent.children.contains_key(&dirname) {
+        if parent.children.iter().any(|(n, _)| n == &dirname) {
             return Err(FsError::AlreadyExists);
         }
 
         parent
             .children
-            .insert(dirname.clone(), Box::new(FileNode::new_dir(dirname)));
+            .push((dirname.clone(), Box::new(FileNode::new_dir(dirname))));
 
         Ok(())
     }
@@ -186,14 +206,13 @@ impl VirtualFileSystem {
     pub fn create_file(&mut self, path: &str, content: &[u8]) -> Result<(), FsError> {
         let (parent, filename) = self.navigate_to_parent_mut(path)?;
 
-        if parent.children.contains_key(&filename) {
+        if parent.children.iter().any(|(n, _)| n == &filename) {
             return Err(FsError::AlreadyExists);
         }
 
-        parent.children.insert(
-            filename.clone(),
-            Box::new(FileNode::new_file(filename, content.to_vec())),
-        );
+        parent
+            .children
+            .push((filename.clone(), Box::new(FileNode::new_file(filename, content.to_vec()))));
 
         Ok(())
     }
@@ -245,7 +264,7 @@ impl VirtualFileSystem {
             return Err(FsError::NotDirectory);
         }
 
-        let entries: Vec<String> = node.children.keys().cloned().collect();
+        let entries: Vec<String> = node.children.iter().map(|(n, _)| n.clone()).collect();
         Ok(entries)
     }
 
@@ -264,13 +283,18 @@ impl VirtualFileSystem {
     pub fn remove_file(&mut self, path: &str) -> Result<(), FsError> {
         let (parent, filename) = self.navigate_to_parent_mut(path)?;
 
-        let node = parent.children.get(&filename).ok_or(FsError::NotFound)?;
+        let idx = parent
+            .children
+            .iter()
+            .position(|(n, _)| n == &filename)
+            .ok_or(FsError::NotFound)?;
+        let node = &parent.children[idx].1;
 
         if node.file_type != FileType::Regular {
             return Err(FsError::NotFile);
         }
 
-        parent.children.remove(&filename);
+        parent.children.remove(idx);
         Ok(())
     }
 
@@ -278,7 +302,12 @@ impl VirtualFileSystem {
     pub fn remove_dir(&mut self, path: &str) -> Result<(), FsError> {
         let (parent, dirname) = self.navigate_to_parent_mut(path)?;
 
-        let node = parent.children.get(&dirname).ok_or(FsError::NotFound)?;
+        let idx = parent
+            .children
+            .iter()
+            .position(|(n, _)| n == &dirname)
+            .ok_or(FsError::NotFound)?;
+        let node = &parent.children[idx].1;
 
         if node.file_type != FileType::Directory {
             return Err(FsError::NotDirectory);
@@ -288,7 +317,7 @@ impl VirtualFileSystem {
             return Err(FsError::IoError("Directory not empty".to_string()));
         }
 
-        parent.children.remove(&dirname);
+        parent.children.remove(idx);
         Ok(())
     }
 }

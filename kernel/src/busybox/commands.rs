@@ -358,6 +358,51 @@ impl BusyboxCommandImpl for LsCommand {
     }
 }
 
+pub struct MkdirCommand;
+impl BusyboxCommandImpl for MkdirCommand {
+    fn execute(&self, ctx: &mut CommandContext) -> Result<String, String> {
+        if ctx.args.len() < 2 {
+            return Err("mkdir: missing operand".to_string());
+        }
+
+        let mut errs = Vec::new();
+        for path in &ctx.args[1..] {
+            let res = crate::fs::with_vfs_mut(|vfs| vfs.mkdir(path))
+                .ok_or_else(|| "filesystem not initialized".to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()));
+            if let Err(e) = res {
+                errs.push(format!("mkdir: {}: {}", path, e));
+            }
+        }
+
+        if errs.is_empty() { Ok(String::new()) } else { Err(errs.join("\n")) }
+    }
+}
+
+pub struct TouchCommand;
+impl BusyboxCommandImpl for TouchCommand {
+    fn execute(&self, ctx: &mut CommandContext) -> Result<String, String> {
+        if ctx.args.len() < 2 {
+            return Err("touch: missing file operand".to_string());
+        }
+
+        let mut errs = Vec::new();
+        for path in &ctx.args[1..] {
+            // If file exists, succeed; otherwise create empty file
+            let exists = crate::fs::with_vfs(|vfs| vfs.exists(path))
+                .unwrap_or(false);
+            if !exists {
+                let res = crate::fs::with_vfs_mut(|vfs| vfs.create_file(path, &[]))
+                    .ok_or_else(|| "filesystem not initialized".to_string())
+                    .and_then(|r| r.map_err(|e| e.to_string()));
+                if let Err(e) = res { errs.push(format!("touch: {}: {}", path, e)); }
+            }
+        }
+
+        if errs.is_empty() { Ok(String::new()) } else { Err(errs.join("\n")) }
+    }
+}
+
 pub struct CatCommand;
 impl BusyboxCommandImpl for CatCommand {
     fn execute(&self, ctx: &mut CommandContext) -> Result<String, String> {
@@ -529,6 +574,8 @@ pub fn get_command_impl(name: &str) -> Option<Box<dyn BusyboxCommandImpl>> {
         "wc" => Some(Box::new(WcCommand)),
         "clear" => Some(Box::new(ClearCommand)),
         "ls" => Some(Box::new(LsCommand)),
+        "mkdir" => Some(Box::new(MkdirCommand)),
+        "touch" => Some(Box::new(TouchCommand)),
         "cat" => Some(Box::new(CatCommand)),
         "less" => Some(Box::new(LessCommand)),
         "more" => Some(Box::new(MoreCommand)),
