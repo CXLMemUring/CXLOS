@@ -99,13 +99,21 @@ fn reserve_wired_regions(aspace: &mut AddressSpace, boot_info: &BootInfo, flush:
 
     // Safety: we have to trust the loaders BootInfo here
     let own_elf = unsafe {
-        let base = boot_info
-            .physical_address_offset
-            .checked_add(boot_info.kernel_phys.start)
-            .unwrap() as *const u8;
+        let base_virt = if boot_info.physical_address_offset != 0 {
+            boot_info
+                .physical_address_offset
+                .checked_add(boot_info.kernel_phys.start)
+                .unwrap()
+        } else {
+            boot_info
+                .physical_memory_map
+                .start
+                .checked_add(boot_info.kernel_phys.start)
+                .unwrap()
+        } as *const u8;
 
         slice::from_raw_parts(
-            base,
+            base_virt,
             boot_info
                 .kernel_phys
                 .end
@@ -113,7 +121,35 @@ fn reserve_wired_regions(aspace: &mut AddressSpace, boot_info: &BootInfo, flush:
                 .unwrap(),
         )
     };
-    let own_elf = xmas_elf::ElfFile::new(own_elf).unwrap();
+    let own_elf = match xmas_elf::ElfFile::new(own_elf) {
+        Ok(elf) => elf,
+        Err(_) => {
+            // Fallback: reserve the entire kernel virtual range with broad permissions (x86_64 minimal path)
+            #[cfg(target_arch = "x86_64")]
+            {
+                let range = Range::from(
+                    VirtualAddress::new(boot_info.kernel_virt.start)
+                        .unwrap()
+                        .align_down(arch::PAGE_SIZE)
+                        ..VirtualAddress::new(boot_info.kernel_virt.end)
+                            .unwrap()
+                            .checked_align_up(arch::PAGE_SIZE)
+                            .unwrap(),
+                );
+                aspace
+                    .reserve(
+                        range,
+                        Permissions::READ | Permissions::EXECUTE,
+                        Some("Kernel Image".to_string()),
+                        flush,
+                    )
+                    .unwrap();
+                return;
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            panic!("invalid kernel ELF in BootInfo");
+        }
+    };
 
     for ph in own_elf.program_iter() {
         if ph.get_type().unwrap() != Type::Load {

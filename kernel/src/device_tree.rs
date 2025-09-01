@@ -26,8 +26,14 @@ pub struct DeviceTree {
     inner: DeviceTreeInner<'this>,
 }
 
+#[cfg(not(target_arch = "x86_64"))]
 struct DeviceTreeInner<'devtree> {
     phandle2ptr: HashMap<u32, NonNull<Device<'devtree>>>,
+    root: NonNull<Device<'devtree>>,
+}
+
+#[cfg(target_arch = "x86_64")]
+struct DeviceTreeInner<'devtree> {
     root: NonNull<Device<'devtree>>,
 }
 
@@ -82,8 +88,20 @@ impl DeviceTree {
         // For x86_64, create a minimal device tree since the platform doesn't use FDT
         #[cfg(target_arch = "x86_64")]
         {
+            #[inline(always)]
+            unsafe fn serial_out(byte: u8) {
+                core::arch::asm!(
+                    "out dx, al",
+                    in("al") byte,
+                    in("dx") 0x3F8u16,
+                    options(nostack, preserves_flags)
+                );
+            }
+            unsafe { serial_out(b'D'); }
             let alloc = Bump::new();
+            unsafe { serial_out(b'0'); }
             return DeviceTree::try_new(alloc, |alloc| {
+                unsafe { serial_out(b'1'); }
                 // Create a minimal root node
                 let root = alloc.alloc(Device {
                     name: NodeName {
@@ -97,44 +115,51 @@ impl DeviceTree {
                     first_child: None,
                     next_sibling: None,
                 });
-                Ok(DeviceTreeInner {
-                    phandle2ptr: HashMap::new(),
-                    root: NonNull::from(root),
-                })
+                unsafe { serial_out(b'2'); }
+                // Avoid constructing a hashmap here; set an empty map without allocations
+                let inner = DeviceTreeInner { root: NonNull::from(root) };
+                unsafe { serial_out(b'4'); }
+                Ok(inner)
             });
         }
 
-        // Safety: u32 has no invalid bit patterns
-        let (left, aligned, _) = unsafe { fdt.align_to::<u32>() };
-        assert!(left.is_empty()); // TODO decide what to do with unaligned slices
-        let fdt = Fdt::new(aligned)?;
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            // Safety: u32 has no invalid bit patterns
+            let (left, aligned, _) = unsafe { fdt.align_to::<u32>() };
+            assert!(left.is_empty()); // TODO decide what to do with unaligned slices
+            let fdt = Fdt::new(aligned)?;
 
-        let alloc = Bump::new();
+            let alloc = Bump::new();
 
-        DeviceTree::try_new(alloc, |alloc| {
-            let mut phandle2ptr = HashMap::new();
+            return DeviceTree::try_new(alloc, |alloc| {
+                let mut phandle2ptr = HashMap::new();
 
-            let mut stack: [Link<Device>; 16] = [const { None }; 16];
+                let mut stack: [Link<Device>; 16] = [const { None }; 16];
 
-            let root = unflatten_root(&fdt, alloc)?;
-            stack[0] = Some(root);
+                let root = unflatten_root(&fdt, alloc)?;
+                stack[0] = Some(root);
 
-            let mut iter = fdt.nodes()?;
-            while let Some((depth, node)) = iter.next()? {
-                let ptr = unflatten_node(
-                    node,
-                    &mut phandle2ptr,
-                    stack[depth - 1].unwrap(),
-                    stack[depth],
-                    alloc,
-                )?;
+                let mut iter = fdt.nodes()?;
+                while let Some((depth, node)) = iter.next()? {
+                    let ptr = unflatten_node(
+                        node,
+                        &mut phandle2ptr,
+                        stack[depth - 1].unwrap(),
+                        stack[depth],
+                        alloc,
+                    )?;
 
-                // insert ourselves into the stack so we will become the new previous sibling in the next iteration
-                stack[depth] = Some(ptr);
-            }
+                    // insert ourselves into the stack so we will become the new previous sibling in the next iteration
+                    stack[depth] = Some(ptr);
+                }
 
-            Ok(DeviceTreeInner { phandle2ptr, root })
-        })
+                Ok(DeviceTreeInner { phandle2ptr, root })
+            });
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        unreachable!("x86_64 DeviceTree::parse handled in the cfg(target_arch) block above")
     }
 
     /// Matches the root device tree `compatible` string against the given list of strings.
@@ -174,8 +199,16 @@ impl DeviceTree {
     }
 
     pub fn find_by_phandle(&self, phandle: u32) -> Option<&Device<'_>> {
-        // Safety: we only inserted valid pointers into the map, so we should only get valid pointers out...
-        self.with_inner(|inner| unsafe { Some(inner.phandle2ptr.get(&phandle)?.as_ref()) })
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            // Safety: we only inserted valid pointers into the map, so we should only get valid pointers out...
+            return self.with_inner(|inner| unsafe { Some(inner.phandle2ptr.get(&phandle)?.as_ref()) });
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            let _ = phandle;
+            None
+        }
     }
 
     #[inline]

@@ -15,7 +15,7 @@ use spin::{LazyLock, OnceLock};
 
 use crate::arch;
 use crate::mem::frame_alloc::frame_list::FrameList;
-use crate::mem::frame_alloc::{FRAME_ALLOC, Frame, FrameAllocator};
+use crate::mem::frame_alloc::{global as FRAME_ALLOC_GLOBAL, Frame, FrameAllocator};
 
 pub trait Provider: Debug {
     // TODO make async
@@ -32,7 +32,7 @@ pub trait Provider: Debug {
 }
 
 pub static THE_ZERO_FRAME: LazyLock<Arc<TheZeroFrame>> = LazyLock::new(|| {
-    let frame_alloc = FRAME_ALLOC.get().unwrap();
+    let frame_alloc = FRAME_ALLOC_GLOBAL();
     Arc::new(TheZeroFrame::new(frame_alloc))
 });
 

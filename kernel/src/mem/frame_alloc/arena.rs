@@ -244,9 +244,7 @@ impl FallibleIterator for ArenaSelections {
     type Error = SelectionError;
 
     fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
-        let Some(mut arena) = self.free_regions.pop() else {
-            return Ok(None);
-        };
+        while let Some(mut arena) = self.free_regions.pop() {
 
         while let Some(region) = self.free_regions.pop() {
             tracing::debug!(arena.end=?arena.end,region=?region, "Attempting to add free region");
@@ -284,8 +282,8 @@ impl FallibleIterator for ArenaSelections {
 
         // We can't use empty arenas anyway
         if aligned.is_empty() {
-            tracing::error!("arena is too small");
-            return Err(SelectionError { range: aligned });
+            tracing::warn!("arena is too small (empty), skipping");
+            continue;
         }
 
         let bookkeeping_start = aligned
@@ -296,18 +294,20 @@ impl FallibleIterator for ArenaSelections {
 
         // The arena has no space to hold its own bookkeeping
         if bookkeeping_start < aligned.start {
-            tracing::error!("arena is too small");
-            return Err(SelectionError { range: aligned });
+            tracing::warn!("arena is too small for bookkeeping, skipping {aligned:#x?}");
+            continue;
         }
 
         let bookkeeping = Range::from(bookkeeping_start..aligned.end);
         aligned.end = bookkeeping.start;
 
-        Ok(Some(ArenaSelection {
+        return Ok(Some(ArenaSelection {
             arena: aligned,
             bookkeeping,
             wasted_bytes: mem::take(&mut self.wasted_bytes),
-        }))
+        }));
+        }
+        Ok(None)
     }
 }
 

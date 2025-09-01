@@ -48,6 +48,16 @@ impl<'a> BootstrapAllocator<'a> {
     }
 
     pub fn allocate_contiguous(&mut self, layout: Layout) -> Option<PhysicalAddress> {
+        // debug: 'c' entering allocate_contiguous
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x63\n\
+                 out dx, al",
+                options(nostack, preserves_flags)
+            );
+        }
         let requested_size = layout.pad_to_align().size();
         assert_eq!(
             layout.align(),
@@ -57,12 +67,32 @@ impl<'a> BootstrapAllocator<'a> {
         let mut offset = self.offset;
 
         for region in self.regions.iter().rev() {
+            // debug: 'r' each region iteration
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                core::arch::asm!(
+                    "mov dx, 0x3F8\n\
+                     mov al, 0x72\n\
+                     out dx, al",
+                    options(nostack, preserves_flags)
+                );
+            }
             // only consider regions that we haven't already exhausted
             if offset < region.size() {
                 // Allocating a contiguous range has different requirements than "regular" allocation
                 // contiguous are rare and often happen in very critical paths where e.g. virtual
                 // memory is not available yet. So we rather waste some memory than outright crash.
                 if region.size() - offset < requested_size {
+                    // debug: 's' region too small, skip
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        core::arch::asm!(
+                            "mov dx, 0x3F8\n\
+                             mov al, 0x73\n\
+                             out dx, al",
+                            options(nostack, preserves_flags)
+                        );
+                    }
                     tracing::warn!(
                         "Skipped memory region {region:?} since it was too small to fulfill request for {requested_size} bytes. Wasted {} bytes in the process...",
                         region.size() - offset
@@ -75,13 +105,31 @@ impl<'a> BootstrapAllocator<'a> {
 
                 let frame = region.end.checked_sub(offset + requested_size).unwrap();
                 self.offset += requested_size;
-
+                // debug: 'u' returning success
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    core::arch::asm!(
+                        "mov dx, 0x3F8\n\
+                         mov al, 0x75\n\
+                         out dx, al",
+                        options(nostack, preserves_flags)
+                    );
+                }
                 return Some(frame);
             }
 
             offset -= region.size();
         }
-
+        // debug: 'n' no region found
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x6E\n\
+                 out dx, al",
+                options(nostack, preserves_flags)
+            );
+        }
         None
     }
 

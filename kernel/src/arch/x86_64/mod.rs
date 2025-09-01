@@ -47,19 +47,25 @@ pub fn init() -> state::Global {
 #[cold]
 pub fn per_cpu_init_early() {
     unsafe {
-        // FS segment base register is mysteriously gets cleared when jumping from
-        // the loader to the kernel entry.
-        // this assembly below sets the FS_BASE MSR to the correct value
-        // TODO: figure out why this happens
-        // The TLS region starts at 0xffffffc080001000 as shown in loader output
+        // Debug checkpoint: 'S' entering per_cpu_init_early
         core::arch::asm!(
-            "mov rcx, 0xc0000100",  // FS_BASE MSR
-            "mov rax, 0xffffffc080001000",  // Low 32 bits of TLS base
-            "mov rdx, 0xffffffc0",           // High 32 bits of TLS base
-            "wrmsr",
-            out("rcx") _,
+            "mov dx, 0x3F8\n\
+             mov al, 0x53\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+        // Ensure FPU/SSE are usable before issuing any FPU instruction.
+        // Set CR0.MP, clear CR0.EM and CR0.TS.
+        core::arch::asm!(
+            "mov rax, cr0",
+            // Clear EM (bit 2) and TS (bit 3)
+            "and rax, {mask_clear}",
+            // Set MP (bit 1)
+            "or  rax, {mask_set}",
+            "mov cr0, rax",
+            mask_clear = const !( (1u64 << 2) | (1u64 << 3) ),
+            mask_set   = const  (1u64 << 1),
             out("rax") _,
-            out("rdx") _,
         );
 
         // Initialize x87 FPU
@@ -90,6 +96,14 @@ pub fn per_cpu_init_early() {
             "mov cr4, rax",
             tsd_mask = const !0x4u64,
             out("rax") _,
+        );
+
+        // Debug checkpoint: 's' leaving per_cpu_init_early
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x73\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
         );
     }
 }

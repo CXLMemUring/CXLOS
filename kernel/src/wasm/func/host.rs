@@ -89,6 +89,10 @@ impl<T> Caller<'_, T> {
             caller: self.caller,
         }
     }
+
+    pub fn instance_mut(&mut self) -> &mut crate::wasm::vm::Instance {
+        self.caller
+    }
 }
 
 #[derive(Debug)]

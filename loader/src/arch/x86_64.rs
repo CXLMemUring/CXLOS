@@ -256,8 +256,14 @@ pub unsafe fn handoff_to_kernel(cpuid: usize, boot_ticks: u64, init: &GlobalInit
             // Clear return address
             "xor rax, rax",
 
-            // Jump to kernel
-            "jmp {kernel_entry}",
+            // Call into kernel entry with System V ABI stack alignment
+            // so the callee observes rsp%16==8 (due to the pushed return address).
+            "call {kernel_entry}",
+
+            // The kernel should never return. If it does, halt this CPU.
+            "2:",
+            "   hlt",
+            "   jmp 2b",
 
             cpuid = in(reg) cpuid,
             boot_info = in(reg) init.boot_info as usize,

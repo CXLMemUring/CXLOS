@@ -188,9 +188,18 @@ cfg_if::cfg_if! {
         impl SerialStream {
             const COM1: u16 = 0x3F8;
 
-            fn new() -> Self {
-                Self { port: Self::COM1 }
+    fn new() -> Self {
+            // debug: 's' SerialStream::new
+            unsafe {
+                core::arch::asm!(
+                    "mov dx, 0x3F8\n\
+                     mov al, 0x73\n\
+                     out dx, al",
+                    options(nomem, nostack, preserves_flags)
+                );
             }
+            Self { port: Self::COM1 }
+        }
 
             #[inline]
             fn write_byte(&mut self, byte: u8) {
@@ -238,7 +247,28 @@ pub struct SemihostingWriter<'a>(ReentrantMutexGuard<'a, UnsafeCell<DebugStream>
 
 impl Semihosting {
     pub fn new() -> Self {
-        Self(ReentrantMutex::new(UnsafeCell::new(new_debug_stream())))
+        // debug: 'M' entering Semihosting::new
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x4D\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        let s = Self(ReentrantMutex::new(UnsafeCell::new(new_debug_stream())));
+        // debug: 'm' leaving Semihosting::new
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x6D\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        s
     }
 }
 

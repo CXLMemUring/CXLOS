@@ -17,7 +17,7 @@ use core::range::Range;
 use arrayvec::ArrayVec;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use spin::{Barrier, OnceLock};
+use spin::{Barrier, Once};
 
 use crate::boot_info::prepare_boot_info;
 use crate::error::Error;
@@ -46,9 +46,19 @@ pub const STACK_SIZE: usize = 32 * arch::PAGE_SIZE;
 
 pub type Result<T> = core::result::Result<T, Error>;
 
+#[repr(align(64))]
+struct Aligned<T>(core::mem::MaybeUninit<T>);
+
+#[allow(static_mut_refs)]
 unsafe fn main(hartid: usize, opaque: *const c_void, boot_ticks: u64) -> ! {
-    static GLOBAL_INIT: OnceLock<GlobalInitResult> = OnceLock::new();
-    let res = GLOBAL_INIT.get_or_init(|| do_global_init(hartid, opaque));
+    static GLOBAL_INIT_ONCE: Once = Once::new();
+    static mut GLOBAL_INIT_STORAGE: Aligned<GlobalInitResult> = Aligned(core::mem::MaybeUninit::uninit());
+
+    GLOBAL_INIT_ONCE.call_once(|| unsafe {
+        let init = do_global_init(hartid, opaque);
+        GLOBAL_INIT_STORAGE.0.as_mut_ptr().write(init);
+    });
+    let res: &GlobalInitResult = unsafe { &*GLOBAL_INIT_STORAGE.0.as_ptr() };
 
     // Enable the MMU on all harts. Note that this technically reenables it on the initializing hart
     // but there is no harm in that.
@@ -258,10 +268,20 @@ fn do_global_init(hartid: usize, opaque: *const c_void) -> GlobalInitResult {
     )
     .unwrap();
 
-    let kernel_entry = kernel_virt
-        .start
-        .checked_add(usize::try_from(kernel.elf_file.header.pt2.entry_point()).unwrap())
-        .unwrap();
+    let elf_entry = usize::try_from(kernel.elf_file.header.pt2.entry_point()).unwrap();
+    // If the ELF entry is already a high canonical VA (linked-at-VA kernel), use it directly.
+    // Otherwise treat it as an offset and add our chosen kernel_virt base.
+    let kernel_entry = if elf_entry >= arch::KERNEL_ASPACE_BASE {
+        elf_entry
+    } else {
+        kernel_virt.start.checked_add(elf_entry).unwrap()
+    };
+    log::debug!(
+        "ELF entry {:#x}, kernel_virt.start {:#x}, chosen entry {:#x}",
+        elf_entry,
+        kernel_virt.start,
+        kernel_entry
+    );
 
     GlobalInitResult {
         boot_info,

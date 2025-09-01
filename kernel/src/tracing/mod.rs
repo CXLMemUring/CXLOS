@@ -1,4 +1,5 @@
 // Copyright 2025 Jonas Kruckenberg
+#![allow(static_mut_refs)]
 //
 // Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
 // http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
@@ -21,6 +22,7 @@ use cpu_local::cpu_local;
 pub use filter::Filter;
 use registry::Registry;
 use spin::OnceLock;
+use core::sync::atomic::{AtomicU8, Ordering};
 use tracing::field;
 use tracing_core::span::{Attributes, Current, Id, Record};
 use tracing_core::{Collect, Dispatch, Event, Interest, Level, LevelFilter, Metadata};
@@ -28,7 +30,12 @@ use tracing_core::{Collect, Dispatch, Event, Interest, Level, LevelFilter, Metad
 use crate::state::try_global;
 use crate::tracing::writer::{MakeWriter, Semihosting};
 
-static SUBSCRIBER: OnceLock<Subscriber> = OnceLock::new();
+// Custom early init storage to avoid potential alignment issues with generic OnceLock<T>
+#[repr(align(64))]
+struct Aligned<T>(core::mem::MaybeUninit<T>);
+
+static SUBSCRIBER_INIT: AtomicU8 = AtomicU8::new(0);
+static mut SUBSCRIBER_STORAGE: Aligned<Subscriber> = Aligned(core::mem::MaybeUninit::uninit());
 
 cpu_local! {
     /// Per-cpu indentation representing the span depth we're currently in
@@ -44,24 +51,84 @@ pub fn per_cpu_init_early(cpuid: usize) {
 /// events, but no spans yet.
 ///
 /// This should be called as early in the boot process as possible.
+#[allow(static_mut_refs)]
 pub fn init_early() {
-    let subscriber = SUBSCRIBER.get_or_init(|| Subscriber {
-        // level_filter,
-        output: Output::new(Semihosting::new()),
-        lateinit: OnceLock::new(),
-    });
-    ::log::set_logger(subscriber).unwrap();
+    // debug: entering tracing::init_early 'T'
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x54\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    if SUBSCRIBER_INIT
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire)
+        .is_ok()
+    {
+        let sub = Subscriber {
+            output: {
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    core::arch::asm!(
+                        "mov dx, 0x3F8\n\
+                         mov al, 0x4F\n\
+                         out dx, al",
+                        options(nomem, nostack, preserves_flags)
+                    );
+                }
+                Output::new(Semihosting::new())
+            },
+            lateinit: OnceLock::new(),
+        };
+        // Safety: single initialization guarded by atomic flag
+        unsafe { SUBSCRIBER_STORAGE.0.as_mut_ptr().write(sub) };
+    }
+    let subscriber = unsafe { &*SUBSCRIBER_STORAGE.0.as_ptr() };
+    // debug: after get_or_init 't'
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x74\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    // Skip setting the global log::Logger in early init to avoid potential
+    // interactions during very early boot. We'll fully configure logging in init().
+    // (Previously, we called ::log::set_logger and set_max_level here.)
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        // marker: 'E' early init prepared subscriber
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x45\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
 
-    let subscriber = SUBSCRIBER.get().unwrap();
-    let dispatch = Dispatch::from_static(subscriber);
-    dispatch::set_global_default(dispatch).unwrap();
+    // Skip setting global tracing dispatch this early; do it in init().
+    // debug: leaving init_early 'e'
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x65\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
 }
 
 /// Fully initialize the subsystem, after this point tracing [`Span`]s will be processed as well.
 pub fn init(filter: Filter) {
-    let subscriber = SUBSCRIBER
-        .get()
-        .expect("tracing::init must be called after tracing::init_early");
+    let subscriber = unsafe { &*SUBSCRIBER_STORAGE.0.as_ptr() };
+    // Set global tracing dispatch now that early init completed
+    let dispatch = Dispatch::from_static(subscriber);
+    dispatch::set_global_default(dispatch).unwrap();
 
     ::log::set_max_level(match filter.max_level() {
         LevelFilter::OFF => ::log::LevelFilter::Off,

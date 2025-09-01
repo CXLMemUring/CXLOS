@@ -23,9 +23,39 @@ use crate::mem::VirtualAddress;
 
 static BACKTRACE_INFO: OnceLock<BacktraceInfo> = OnceLock::new();
 
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn serial_out(byte: u8) {
+    core::arch::asm!(
+        "out dx, al",
+        in("al") byte,
+        in("dx") 0x3F8u16,
+        options(nostack, preserves_flags)
+    );
+}
+
 #[cold]
 pub fn init(boot_info: &'static BootInfo, backtrace_style: BacktraceStyle) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Temporarily disable heavy backtrace init on x86_64 during early bring-up.
+        unsafe {
+            serial_out(b'F');
+            serial_out(b'f');
+        }
+        return;
+    }
+    // debug: 'F' entering backtrace::init
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        serial_out(b'F');
+    }
     BACKTRACE_INFO.get_or_init(|| BacktraceInfo::new(boot_info, backtrace_style));
+    // debug: 'f' leaving backtrace::init
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        serial_out(b'f');
+    }
 }
 
 /// Information about the kernel required to build a backtrace
@@ -64,15 +94,31 @@ pub struct Backtrace<'a, const MAX_FRAMES: usize> {
 
 impl BacktraceInfo {
     fn new(boot_info: &'static BootInfo, backtrace_style: BacktraceStyle) -> Self {
+        // debug: '1' entering BacktraceInfo::new
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            serial_out(b'1');
+        }
         BacktraceInfo {
             kernel_virt_base: boot_info.kernel_virt.start as u64,
             // Safety: we have to trust the loaders BootInfo here
             elf: unsafe {
-                let base = boot_info
-                    .physical_address_offset
-                    .checked_add(boot_info.kernel_phys.start)
-                    .unwrap() as *const u8;
-
+                // Prefer high-half mapping via physical memory map when available
+                let base = if boot_info.physical_address_offset != 0 {
+                    boot_info
+                        .physical_address_offset
+                        .checked_add(boot_info.kernel_phys.start)
+                        .unwrap()
+                } else {
+                    boot_info
+                        .physical_memory_map
+                        .start
+                        .checked_add(boot_info.kernel_phys.start)
+                        .unwrap()
+                } as *const u8;
+                // debug: '2' after computing ELF base
+                #[cfg(target_arch = "x86_64")]
+                serial_out(b'2');
                 slice::from_raw_parts(
                     base,
                     boot_info

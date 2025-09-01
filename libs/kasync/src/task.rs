@@ -869,7 +869,7 @@ where
         cfg_if::cfg_if! {
             if #[cfg(test)] {
                 let result = ::std::panic::catch_unwind(poll);
-            } else if #[cfg(feature = "unwind2")] {
+            } else if #[cfg(all(feature = "unwind2", target_os = "none"))] {
                 let result = ::panic_unwind2::catch_unwind(poll);
             } else {
                 let result = Ok(poll());

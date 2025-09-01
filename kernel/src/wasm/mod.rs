@@ -32,9 +32,9 @@ mod values;
 mod vm;
 pub mod host_fs;
 /// Internal default instance allocator suitable for bootstrapping.
-static PLACEHOLDER_ALLOC: vm::instance_alloc::PlaceholderAllocatorDontUse = vm::instance_alloc::PlaceholderAllocatorDontUse;
+static PLACEHOLDER_ALLOC: vm::PlaceholderAllocatorDontUse = vm::PlaceholderAllocatorDontUse;
 
-pub fn default_instance_allocator() -> &'static (vm::InstanceAllocator + Send + Sync) {
+pub fn default_instance_allocator() -> &'static (dyn vm::InstanceAllocator + Send + Sync) {
     &PLACEHOLDER_ALLOC
 }
 
@@ -50,10 +50,8 @@ pub use store::Store;
 pub use table::Table;
 pub use tag::Tag;
 pub use trap::TrapKind;
-#[cfg(test)]
 pub use values::Val;
 pub use vm::ConstExprEvaluator;
-#[cfg(test)]
 pub use vm::PlaceholderAllocatorDontUse;
 
 use crate::wasm::store::StoreOpaque;

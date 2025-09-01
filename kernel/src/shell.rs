@@ -276,12 +276,8 @@ pub fn eval(line: &str) {
         // Try WASM BusyBox for simple no-arg commands if initialized
         if busybox::wasm_loader::is_initialized() {
             let cmd = parts[0].as_str();
-            let noarg_supported = matches!(cmd, "pwd" | "uname" | "date" | "whoami" | "free" | "ls");
-            if noarg_supported && parts.len() == 1 {
-                if let Ok(true) = busybox::wasm_loader::call_export_noargs(cmd) {
-                    return;
-                }
-            }
+            let args: alloc::vec::Vec<&str> = parts.iter().skip(1).map(|s| s.as_str()).collect();
+            if let Ok(true) = busybox::wasm_loader::call_busybox(cmd, &args) { return; }
         }
 
         if let Some(impl_fn) = commands::get_command_impl(&parts[0]) {

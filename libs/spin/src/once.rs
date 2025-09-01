@@ -102,15 +102,47 @@ impl Once {
 
             match xchg {
                 Ok(_) => {
+                    // debug: entering RUNNING 'R'
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        core::arch::asm!(
+                            "mov dx, 0x3F8\n\
+                             mov al, 0x52\n\
+                             out dx, al",
+                            options(nomem, nostack, preserves_flags)
+                        );
+                    }
                     let panic_guard = PanicGuard {
                         status: &self.status,
                     };
 
                     f();
 
+                    // debug: after f() 'r'
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        core::arch::asm!(
+                            "mov dx, 0x3F8\n\
+                             mov al, 0x72\n\
+                             out dx, al",
+                            options(nomem, nostack, preserves_flags)
+                        );
+                    }
+
                     mem::forget(panic_guard);
 
                     self.status.store(STATUS_COMPLETE, Ordering::Release);
+
+                    // debug: after COMPLETE 'C'
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        core::arch::asm!(
+                            "mov dx, 0x3F8\n\
+                             mov al, 0x43\n\
+                             out dx, al",
+                            options(nomem, nostack, preserves_flags)
+                        );
+                    }
 
                     return;
                 }

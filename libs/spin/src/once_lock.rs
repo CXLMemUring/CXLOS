@@ -37,15 +37,69 @@ impl<T> OnceLock<T> {
     ///
     /// Panics if the closure panics.
     pub fn get_or_init<F: FnOnce() -> T>(&self, f: F) -> &T {
+        // debug: before call_once 'I'
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x49\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
         self.once.call_once(|| {
             self.data.with_mut(|data| {
+                // Debug: dump pointer low nibble before write
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    let p = (*data).as_mut_ptr() as usize;
+                    let nib = (p & 0xF) as u8;
+                    let ch = if nib < 10 { b'0' + nib } else { b'a' + (nib - 10) };
+                    core::arch::asm!(
+                        "out dx, al",
+                        in("al") ch,
+                        in("dx") 0x3F8u16,
+                        options(nomem, preserves_flags)
+                    );
+                }
                 // SAFETY: `Once` ensures this is only called once
                 unsafe { (*data).as_mut_ptr().write(f()) }
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    core::arch::asm!(
+                        "out dx, al",
+                        in("al") b'W',
+                        in("dx") 0x3F8u16,
+                        options(nomem, preserves_flags)
+                    );
+                }
             });
         });
 
+        // debug: after call_once 'i'
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x69\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+
         // SAFETY: `Once` ensures this is only called once
-        unsafe { self.force_get() }
+        let ptr = unsafe { self.force_get() };
+        // debug: before returning 'f'
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x66\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        ptr
     }
 
     /// # Errors

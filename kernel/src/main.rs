@@ -64,6 +64,42 @@ use crate::device_tree::DeviceTree;
 use crate::mem::bootstrap_alloc::BootstrapAllocator;
 use crate::state::{CpuLocal, Global};
 
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn serial_out(byte: u8) {
+    core::arch::asm!(
+        "out dx, al",
+        in("al") byte,
+        in("dx") 0x3F8u16,
+        options(nostack, preserves_flags)
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn print_nibble_hex(n: u8) {
+    let ch = if n < 10 { b'0' + n } else { b'a' + (n - 10) };
+    serial_out(ch);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn print_byte_hex(b: u8) {
+    unsafe {
+        print_nibble_hex(b >> 4);
+        print_nibble_hex(b & 0xF);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn print_u64_hex(v: u64) {
+    for shift in (0..64).step_by(4).rev() {
+        let nib = ((v >> shift) & 0xF) as u8;
+        unsafe { print_nibble_hex(nib); }
+    }
+}
+
 /// The size of the stack in pages
 pub const STACK_SIZE_PAGES: u32 = 256; // TODO find a lower more appropriate value
 /// The size of the trap handler stack in pages
@@ -102,6 +138,17 @@ extern "C" fn _rust_start(cpuid: usize, boot_info_ptr: usize, boot_ticks: u64) -
 }
 
 fn _rust_start_impl(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) -> ! {
+    // Early serial probe: write 'R' (0x52) to COM1 (0x3F8) to confirm entry
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x52\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
     panic_unwind2::set_hook(|info| {
         tracing::error!("CPU {info}");
 
@@ -139,20 +186,84 @@ fn _rust_start_impl(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64)
 }
 
 fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
+    // Early checkpoint: 'A'
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x41\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
     // perform EARLY per-cpu, architecture-specific initialization
     // (e.g. resetting the FPU)
     arch::per_cpu_init_early();
 
     tracing::per_cpu_init_early(cpuid);
 
+    // checkpoint: 'p' after tracing::per_cpu_init_early
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x70\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    // checkpoint: 'D' before locate_device_tree
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x44\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
     let (fdt, fdt_region_phys) = locate_device_tree(boot_info);
 
+    // checkpoint: 'd' after locate_device_tree
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x64\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
     let mut rng = ChaCha20Rng::from_seed(boot_info.rng_seed);
+
+    // checkpoint: 'G' before try_init_global
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x47\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
 
     let global = state::try_init_global(|| {
         // set up the basic functionality of the tracing subsystem as early as possible
 
         tracing::init_early();
+        // checkpoint: 'a' after init_early
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x61\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
 
         // initialize a simple bump allocator for allocating memory before our virtual memory subsystem
         // is available
@@ -161,19 +272,120 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         tracing::info!("allocatable memories: {:?}", allocatable_memories);
 
         let mut boot_alloc = BootstrapAllocator::new(&allocatable_memories);
+        // checkpoint: 'b' after boot_alloc new
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x62\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
 
         // initializing the global allocator
+        // checkpoint: 'X' before allocator::init
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            serial_out(b'X');
+            // Deep instrumentation: print address and first 16 bytes of allocator::init
+            let fn_ptr = allocator::init as usize;
+            serial_out(b'P');
+            print_u64_hex(fn_ptr as u64);
+            serial_out(b':');
+            let mut i = 0;
+            while i < 16 {
+                let byte = *(fn_ptr as *const u8).add(i);
+                print_byte_hex(byte);
+                i += 1;
+            }
+            serial_out(b'p');
+        }
+
         allocator::init(&mut boot_alloc, boot_info);
+
+        // checkpoint: 'Y' after allocator::init
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            serial_out(b'Y');
+        }
+        // checkpoint: 'c' after allocator::init
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x63\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        // checkpoint: 'x' before DeviceTree::parse
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x78\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
         let device_tree = DeviceTree::parse(fdt)?;
+        // checkpoint: 'd' after DeviceTree::parse
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x64\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
         tracing::debug!("{device_tree:?}");
 
         let bootargs = bootargs::parse(&device_tree)?;
+        // checkpoint: 'e' after bootargs::parse
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x65\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
         // initialize the backtracing subsystem after the allocator has been set up
         // since setting up the symbolization context requires allocation
+        // probe: 'F' before backtrace::init
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'F'); }
         backtrace::init(boot_info, bootargs.backtrace);
+        // checkpoint: 'f' after backtrace::init
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'f'); }
 
         // fully initialize the tracing subsystem now that we can allocate
         tracing::init(bootargs.log);
+        // checkpoint: 'B' already printed elsewhere; add 'g'
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x67\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+
+        // Checkpoint after tracing fully initialized: 'B'
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x42\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
         // perform global, architecture-specific initialization
         let arch = arch::init();
 
@@ -184,9 +396,39 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
 
         // initialize the virtual memory subsystem
         mem::init(boot_info, &mut rng, frame_alloc).unwrap();
+        // checkpoint: 'h' after mem::init
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8\n\
+                 mov al, 0x68\n\
+                 out dx, al",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
 
         // initialize the filesystem
+        // probe: 'I' before fs::init
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            serial_out(b'I');
+            // Deep instrumentation: print address and first 16 bytes of fs::init
+            let fn_ptr = fs::init as usize;
+            serial_out(b'P');
+            print_u64_hex(fn_ptr as u64);
+            serial_out(b':');
+            let mut i = 0;
+            while i < 16 {
+                let byte = *(fn_ptr as *const u8).add(i);
+                print_byte_hex(byte);
+                i += 1;
+            }
+            serial_out(b'p');
+        }
         fs::init().unwrap();
+        // checkpoint: 'i' after fs::init
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'i'); }
 
         // Optionally initialize WASM BusyBox (requires prebuilt wasm + feature flag)
         if let Ok(true) = busybox::wasm_loader::try_init_wasm_busybox() {
@@ -212,6 +454,17 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         })
     })
     .unwrap();
+
+    // Checkpoint after global init returned: 'C'
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x43\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
 
     // perform LATE per-cpu, architecture-specific initialization
     // (e.g. setting the trap vector and enabling interrupts)

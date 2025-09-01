@@ -1,4 +1,5 @@
 // Copyright 2025 Jonas Kruckenberg
+#![allow(static_mut_refs)]
 //
 // Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
 // http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
@@ -22,19 +23,32 @@ use cordyceps::list::List;
 use cpu_local::collection::CpuLocal;
 use fallible_iterator::FallibleIterator;
 pub use frame::{Frame, FrameInfo};
-use spin::{Mutex, OnceLock};
+use spin::{Mutex, Once};
 
 use crate::arch;
 use crate::mem::bootstrap_alloc::BootstrapAllocator;
 use crate::mem::frame_alloc::frame_list::FrameList;
 use crate::mem::{PhysicalAddress, VirtualAddress};
 
-pub static FRAME_ALLOC: OnceLock<FrameAllocator> = OnceLock::new();
+#[repr(align(64))]
+struct Aligned<T>(core::mem::MaybeUninit<T>);
+
+static FRAME_ALLOC_ONCE: Once = Once::new();
+static mut FRAME_ALLOC_STORAGE: Aligned<FrameAllocator> = Aligned(core::mem::MaybeUninit::uninit());
+
 pub fn init(
     boot_alloc: BootstrapAllocator,
     fdt_region: Range<PhysicalAddress>,
 ) -> &'static FrameAllocator {
-    FRAME_ALLOC.get_or_init(|| FrameAllocator::new(boot_alloc, fdt_region))
+    FRAME_ALLOC_ONCE.call_once(|| unsafe {
+        FRAME_ALLOC_STORAGE.0.as_mut_ptr().write(FrameAllocator::new(boot_alloc, fdt_region));
+    });
+    unsafe { &*FRAME_ALLOC_STORAGE.0.as_ptr() }
+}
+
+#[inline]
+pub fn global() -> &'static FrameAllocator {
+    unsafe { &*FRAME_ALLOC_STORAGE.0.as_ptr() }
 }
 
 #[derive(Debug)]

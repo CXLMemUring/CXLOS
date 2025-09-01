@@ -8,6 +8,7 @@
 use crate::wasm::store::{StoreOpaque, Stored};
 use crate::wasm::types::MemoryType;
 use crate::wasm::vm::{ExportedMemory, VMMemoryImport, VmPtr};
+use core::sync::atomic::Ordering;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Memory(Stored<ExportedMemory>);
@@ -29,5 +30,27 @@ impl Memory {
             vmctx: VmPtr::from(export.vmctx),
             index: export.index,
         }
+    }
+
+    /// Unsafe: returns the base pointer and current length of the linear memory.
+    /// The caller must ensure pointer arithmetic and bounds are valid.
+    pub unsafe fn raw_parts(&self, store: &StoreOpaque) -> (*mut u8, usize) {
+        let export = &store[self.0];
+        let def = export.definition.as_ptr();
+        // Safety: caller upholds memory validity for the lifetime of use
+        unsafe {
+            ((*def).base.as_ptr(), (*def).current_length(Ordering::Relaxed))
+        }
+    }
+
+    /// Unsafe: write `data` to memory at `offset` if it fits, returning true on success.
+    pub unsafe fn write(&self, store: &StoreOpaque, offset: usize, data: &[u8]) -> bool {
+        let (base, len) = unsafe { self.raw_parts(store) };
+        if offset > len || data.len() > len - offset {
+            return false;
+        }
+        // Safety: bounds checked above
+        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), base.add(offset), data.len()) };
+        true
     }
 }

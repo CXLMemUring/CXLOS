@@ -34,7 +34,11 @@ fn copy_linker_script() {
     match target_arch.as_str() {
         "riscv64" => f.write_all(include_bytes!("./riscv64-qemu.ld")).unwrap(),
         "x86_64" => f.write_all(include_bytes!("./x86_64-qemu.ld")).unwrap(),
-        arch => panic!("Unsupported architecture: {}", arch),
+        _ => {
+            // Non-target hosts (e.g., aarch64 macOS) will still build the crate during
+            // workspace checks. Skip injecting a linker script in that case.
+            return;
+        }
     }
 
     println!("cargo:rustc-link-search={}", dest_path.display());

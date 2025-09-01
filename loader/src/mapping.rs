@@ -495,9 +495,14 @@ fn apply_relocation(rela: &xmas_elf::sections::Rela<P64>, virt_base: usize) {
 
     const R_RISCV_RELATIVE: u32 = 3;
     const R_X86_64_RELATIVE: u32 = 8;
+    // Some toolchains may emit absolute 64-bit relocations with symbol index 0
+    // for locally-resolvable addresses. Treat these like RELATIVE relocations
+    // by adding the binary's virtual base to the addend.
+    const R_RISCV_64: u32 = 2;
+    const R_X86_64_64: u32 = 1;
 
     match rela.get_type() {
-        R_RISCV_RELATIVE | R_X86_64_RELATIVE => {
+        R_RISCV_RELATIVE | R_X86_64_RELATIVE | R_RISCV_64 | R_X86_64_64 => {
             // Calculate address at which to apply the relocation.
             // dynamic relocations offsets are relative to the virtual layout of the elf,
             // not the physical file
