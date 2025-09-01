@@ -10,6 +10,9 @@
 #![feature(new_range_api)]
 #![feature(maybe_uninit_slice)]
 #![feature(alloc_layout_extra)]
+#![feature(alloc_error_handler)]
+
+extern crate alloc;
 
 use core::ffi::c_void;
 use core::range::Range;
@@ -39,6 +42,7 @@ mod machine_info;
 mod mapping;
 mod page_alloc;
 mod panic;
+mod allocator;
 
 pub const ENABLE_KASLR: bool = false;
 pub const LOG_LEVEL: log::Level = log::Level::Trace;

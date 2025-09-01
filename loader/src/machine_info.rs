@@ -86,6 +86,8 @@ impl MachineInfo<'_> {
             return Ok(Self::minimal_x86_64());
         }
 
+        #[cfg(not(target_arch = "x86_64"))]
+        {
         assert!(!fdt_ptr.is_null());
         assert_eq!(fdt_ptr.align_offset(core::mem::align_of::<u32>()), 0); // make sure the pointer is aligned correctly
 
@@ -229,6 +231,7 @@ impl MachineInfo<'_> {
             rng_seed,
             hart_mask,
         })
+        }
     }
 
     /// Returns the *convex hull* of all physical memory regions i.e. the smallest range of addresses

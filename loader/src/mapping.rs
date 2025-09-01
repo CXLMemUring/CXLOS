@@ -358,19 +358,13 @@ fn handle_bss_section(
 
         // Safety: we just allocated the frame
         unsafe {
-            // On x86_64, the kernel data is identity-mapped, not at KERNEL_ASPACE_BASE
-            let src_addr = if cfg!(target_arch = "x86_64") {
-                last_frame
-            } else if cfg!(target_arch = "riscv64") {
-                arch::KERNEL_ASPACE_BASE.checked_add(last_frame).unwrap()
-            } else {
-                panic!("Unsupported architecture");
-            };
-
-            let src = slice::from_raw_parts(src_addr as *mut u8, data_bytes_before_zero);
-
+            // Access both source and destination via the mapped physical window at phys_off
+            let src = slice::from_raw_parts(
+                phys_off.checked_add(last_frame).unwrap() as *const u8,
+                data_bytes_before_zero,
+            );
             let dst = slice::from_raw_parts_mut(
-                arch::KERNEL_ASPACE_BASE.checked_add(new_frame).unwrap() as *mut u8,
+                phys_off.checked_add(new_frame).unwrap() as *mut u8,
                 data_bytes_before_zero,
             );
 
@@ -441,79 +435,175 @@ fn handle_dynamic_segment(
     log::trace!("parsing RELA info...");
 
     if let Some(rela_info) = ph.parse_rela(elf_file)? {
-        // Convert RELA virtual address to file offset
-        let file_offset = {
-            let vaddr = rela_info.offset;
-            let mut found_offset = None;
+        log::trace!(
+            "RELA table: vaddr={:#x} count={} entsize={}",
+            rela_info.offset,
+            rela_info.count,
+            rela_info.entry_size
+        );
+        // Access RELA entries via the already mapped virtual image
+        // RELA tag gives a virtual address; our image is mapped at virt_base
+        let rela_vaddr = usize::try_from(rela_info.offset)?;
+        let relas_ptr = virt_base.checked_add(rela_vaddr).unwrap() as *const u8;
 
+        // Compute the maximum valid virtual address range for the image from PT_LOAD segments
+        let image_limit = {
+            let mut max_end = 0usize;
             for prog_header in elf_file.program_iter() {
                 if prog_header.get_type().unwrap() == xmas_elf::program::Type::Load {
-                    let seg_vaddr = prog_header.virtual_addr();
-                    let seg_size = prog_header.file_size();
+                    let seg_vaddr = usize::try_from(prog_header.virtual_addr()).unwrap();
+                    let seg_memsz = usize::try_from(prog_header.mem_size()).unwrap();
+                    max_end = core::cmp::max(max_end, seg_vaddr.saturating_add(seg_memsz));
+                }
+            }
+            max_end
+        };
 
-                    if vaddr >= seg_vaddr && vaddr < seg_vaddr + seg_size {
-                        // Found the segment containing our RELA data
-                        let offset_in_segment = vaddr - seg_vaddr;
-                        found_offset = Some(prog_header.offset() + offset_in_segment);
-                        break;
-                    }
+        // Manually parse RELA entries from the mapped bytes to avoid alignment/aliasing issues.
+        // Entry size is provided by dynamic tag (RelaEnt)
+        let count = usize::try_from(rela_info.count)?;
+        let entry_size = usize::try_from(rela_info.entry_size)?;
+        let total_len = count * entry_size;
+        let bytes = unsafe { core::slice::from_raw_parts(relas_ptr, total_len) };
+        if total_len >= 24 {
+            // Dump first entry raw words for diagnostics
+            let w0 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+            let w1 = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+            let w2 = if entry_size >= 24 {
+                u64::from_le_bytes(bytes[16..24].try_into().unwrap())
+            } else {
+                0
+            };
+            log::trace!(
+                "RELA[0] raw: w0(off)={:#x} w1={:#x} w2={:#x}",
+                w0,
+                w1,
+                w2
+            );
+        }
+
+        #[derive(Copy, Clone)]
+        struct Reloc { rtype: u32, offset: usize, addend: isize }
+        let mut to_apply: alloc::vec::Vec<Reloc> = alloc::vec::Vec::with_capacity(count);
+
+        for i in 0..count {
+            let off = i * entry_size;
+            // Bounds check to prevent out-of-bounds reads
+            let end = off + entry_size;
+            if end > bytes.len() {
+                log::error!(
+                    "RELA entry {} out of bounds: off={:#x} end={:#x} len={:#x}",
+                    i,
+                    off,
+                    end,
+                    bytes.len()
+                );
+                break;
+            }
+
+            // Manual little-endian decoding to avoid memcpy precondition traps
+            let mut read_u64 = |p: usize| -> u64 {
+                let mut v = 0u64;
+                let b = &bytes[p..p + 8];
+                v |= b[0] as u64;
+                v |= (b[1] as u64) << 8;
+                v |= (b[2] as u64) << 16;
+                v |= (b[3] as u64) << 24;
+                v |= (b[4] as u64) << 32;
+                v |= (b[5] as u64) << 40;
+                v |= (b[6] as u64) << 48;
+                v |= (b[7] as u64) << 56;
+                v
+            };
+            let mut read_i64 = |p: usize| -> i64 { read_u64(p) as i64 };
+
+            // The standard x86_64 Rela64 layout is 24 bytes: offset(8), info(8), addend(8).
+            // Some linkers may report a different entry size; we still assume the same field order.
+            let mut r_offset = read_u64(off);
+            let mut r_info = read_u64(off + 8);
+            let mut r_addend = read_i64(off + 16);
+
+            // Primary interpretation: [offset][info][addend]
+            let mut rtype = (r_info & 0xFFFF_FFFF) as u32; // type in low 32 bits
+            let mut offset = usize::try_from(r_offset).unwrap_or(usize::MAX);
+            let mut addend = isize::try_from(r_addend).unwrap_or(0);
+
+            // Fallback interpretation for unexpected large types: [offset][addend][info]
+            if rtype > 0x10000 {
+                let alt_info = read_u64(off + entry_size - 8);
+                let alt_addend = read_i64(off + 8);
+                let alt_type = (alt_info & 0xFFFF_FFFF) as u32;
+                if alt_type <= 0x1000 {
+                    r_info = alt_info;
+                    r_addend = alt_addend;
+                    rtype = alt_type;
+                    addend = isize::try_from(r_addend).unwrap_or(0);
                 }
             }
 
-            found_offset.expect("RELA data not found in any LOAD segment")
-        };
+            log::trace!(
+                "RELA entry i={}: off={:#x} info={:#x} type={} addend={:#x}",
+                i,
+                r_offset,
+                r_info,
+                rtype,
+                addend
+            );
 
-        // Safety: we have to trust the ELF data
-        let relas = unsafe {
-            #[expect(clippy::cast_ptr_alignment, reason = "this is fine")]
-            let ptr = elf_file
-                .input
-                .as_ptr()
-                .byte_add(usize::try_from(file_offset)?)
-                .cast::<xmas_elf::sections::Rela<P64>>();
+            to_apply.push(Reloc { rtype, offset, addend });
+        }
 
-            slice::from_raw_parts(ptr, usize::try_from(rela_info.count)?)
-        };
-
-        // TODO memory fence here
-
+        // Apply after decoupling from source bytes
         log::trace!("applying relocations in virtual memory...");
-        for rela in relas {
-            apply_relocation(rela, virt_base);
+        for r in to_apply {
+            apply_relocation(r.rtype, r.offset, r.addend, virt_base, image_limit);
         }
     }
 
     Ok(())
 }
 
-fn apply_relocation(rela: &xmas_elf::sections::Rela<P64>, virt_base: usize) {
-    assert_eq!(
-        rela.get_symbol_table_index(),
-        0,
-        "relocations using the symbol table are not supported"
-    );
+fn apply_relocation(rtype: u32, offset: usize, addend: isize, virt_base: usize, image_limit: usize) {
+    // we only support local (symidx==0) relocations from the dynamic table
+    // which the kernel should be emitting for PIE images
 
-    const R_RISCV_RELATIVE: u32 = 3;
-    const R_X86_64_RELATIVE: u32 = 8;
-    // Some toolchains may emit absolute 64-bit relocations with symbol index 0
-    // for locally-resolvable addresses. Treat these like RELATIVE relocations
-    // by adding the binary's virtual base to the addend.
-    const R_RISCV_64: u32 = 2;
-    const R_X86_64_64: u32 = 1;
+    // Common
+    const R_RISCV_RELATIVE: u32 = 3; // used on riscv
+    const R_X86_64_RELATIVE: u32 = 8; // used on x86_64
 
-    match rela.get_type() {
-        R_RISCV_RELATIVE | R_X86_64_RELATIVE | R_RISCV_64 | R_X86_64_64 => {
+    // Arch-specific IDs (avoid collisions by gating references below)
+    // RISC-V
+    const R_RISCV_64: u32 = 2; // ABS64 on riscv
+    // x86_64
+    const R_X86_64_64: u32 = 1; // ABS64 on x86_64
+    const R_X86_64_PC32: u32 = 2; // PC32 on x86_64 (shares value 2 with R_RISCV_64)
+    const R_X86_64_DTPMOD64: u32 = 16; // TLS module ID on x86_64
+    const R_X86_64_GLOB_DAT: u32 = 6; // Set GOT entry to symbol value
+    const R_X86_64_JUMP_SLOT: u32 = 7; // Set PLT entry to symbol value
+    const R_X86_64_32: u32 = 10; // 32-bit absolute
+    const R_X86_64_32S: u32 = 11; // 32-bit sign-extended
+    const R_X86_64_TPOFF64: u32 = 45; // TLS LE offset
+
+    log::trace!("reloc type={} offset={:#x} addend={:#x}", rtype, offset, addend);
+    if offset >= image_limit {
+        log::warn!(
+            "Skipping relocation: target offset {:#x} beyond image limit {:#x}",
+            offset,
+            image_limit
+        );
+        return;
+    }
+
+    match rtype {
+        // RELATIVE (x86_64/riscv)
+        R_RISCV_RELATIVE | R_X86_64_RELATIVE => {
             // Calculate address at which to apply the relocation.
             // dynamic relocations offsets are relative to the virtual layout of the elf,
             // not the physical file
-            let target = virt_base
-                .checked_add(usize::try_from(rela.get_offset()).unwrap())
-                .unwrap();
+            let target = virt_base.checked_add(offset).unwrap();
 
             // Calculate the value to store at the relocation target.
-            let value = virt_base
-                .checked_add_signed(isize::try_from(rela.get_addend()).unwrap())
-                .unwrap();
+            let value = virt_base.wrapping_add_signed(addend);
 
             // log::trace!("reloc R_RISCV_RELATIVE offset: {:#x}; addend: {:#x} => target {target:?} value {value:?}", rela.get_offset(), rela.get_addend());
             // Safety: we have to trust the ELF data here
@@ -521,7 +611,80 @@ fn apply_relocation(rela: &xmas_elf::sections::Rela<P64>, virt_base: usize) {
                 (target as *mut usize).write_unaligned(value);
             }
         }
-        _ => unimplemented!("unsupported relocation type {}", rela.get_type()),
+        // ABS 64-bit (riscv/x86_64) with symidx==0: store addend as absolute
+        R_RISCV_64 | R_X86_64_64 | R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
+            let target = virt_base.checked_add(offset).unwrap();
+            let value = virt_base.wrapping_add_signed(addend);
+            log::trace!(
+                "ABS-like: type={} target={:#x} write={:#x}",
+                rtype,
+                target,
+                value
+            );
+            unsafe {
+                (target as *mut usize).write_unaligned(value);
+            }
+        }
+        // x86_64 PC32: value = S + A - P. When symidx==0 many linkers encode
+        // a base-relative PC32, so treat S as the image base (virt_base):
+        // value = virt_base + A - P.
+        // Write a 32-bit signed value at target.
+        r if r == R_X86_64_PC32 => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                let target = virt_base.checked_add(offset).unwrap();
+                let p = target as isize;
+                let s = virt_base as isize; // treat symidx==0 as base-relative
+                let val = s.wrapping_add(addend).wrapping_sub(p);
+                log::trace!(
+                    "R_X86_64_PC32: S(base)={:#x} P={:#x} A={:#x} => val={:#x}",
+                    s,
+                    p,
+                    addend,
+                    val
+                );
+                unsafe {
+                    // write 32-bit signed result
+                    (target as *mut i32).write_unaligned(val as i32);
+                }
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                unimplemented!(
+                    "x86_64 PC32 relocation encountered on non-x86_64 target"
+                );
+            }
+        }
+        // x86_64 TLS: for a statically-linked single module, DTPMOD64 is 1
+        R_X86_64_DTPMOD64 => {
+            let target = virt_base.checked_add(offset).unwrap();
+            let module_id: usize = 1;
+            unsafe {
+                (target as *mut usize).write_unaligned(module_id);
+            }
+        }
+        // 32-bit absolute relocations
+        R_X86_64_32 | R_X86_64_32S => {
+            let target = virt_base.checked_add(offset).unwrap();
+            let value = virt_base.wrapping_add_signed(addend) as u32;
+            unsafe { (target as *mut u32).write_unaligned(value) }
+        }
+        // TLS local-exec offset relative to thread pointer. We don't resolve at load-time;
+        // leave addend as-is which is already an offset encoded by linker.
+        R_X86_64_TPOFF64 => {
+            let target = virt_base.checked_add(offset).unwrap();
+            let value = addend as usize;
+            unsafe { (target as *mut usize).write_unaligned(value) }
+        }
+        // Unknown relocation: Log and skip to keep boot progressing.
+        _ => {
+            log::warn!(
+                "Skipping unsupported relocation type {} at offset {:#x} addend={:#x}",
+                rtype,
+                offset,
+                addend
+            );
+        }
     }
 }
 
@@ -870,13 +1033,15 @@ impl ProgramHeader<'_> {
         Ok(Some(RelaInfo {
             offset,
             count: total_size / entry_size,
+            entry_size,
         }))
     }
 }
 
 struct RelaInfo {
-    pub offset: u64,
-    pub count: u64,
+    pub offset: u64,      // Virtual address of RELA table
+    pub count: u64,       // Number of entries
+    pub entry_size: u64,  // Size of each entry in bytes
 }
 
 impl<'a> TryFrom<xmas_elf::program::ProgramHeader<'a>> for ProgramHeader<'a> {

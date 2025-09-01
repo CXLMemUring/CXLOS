@@ -13,7 +13,8 @@ use anyhow::{Context, bail, format_err};
 use hashbrown::HashMap;
 use hashbrown::hash_map::Entry;
 
-use crate::wasm::func::{HostFunc, IntoFunc, WasmParams, WasmResults};
+use crate::wasm::func::{HostFunc, IntoFunc};
+use crate::wasm::func::host::{HostParams, HostResults};
 use crate::wasm::indices::VMSharedTypeIndex;
 use crate::wasm::store::StoreOpaque;
 use crate::wasm::translate::EntityType;
@@ -216,11 +217,7 @@ impl<T> Linker<T> {
         module: &str,
         name: &str,
         func: impl IntoFunc<T, Params, Results>,
-    ) -> crate::Result<&mut Self>
-    where
-        Params: WasmParams,
-        Results: WasmResults,
-    {
+    ) -> crate::Result<&mut Self> {
         let (func, ty) = HostFunc::wrap(self.engine(), func);
 
         let key = self.import_key(module, Some(name));
