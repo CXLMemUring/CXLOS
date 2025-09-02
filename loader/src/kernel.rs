@@ -10,7 +10,7 @@ use core::range::Range;
 use core::{fmt, slice};
 
 use loader_api::LoaderConfig;
-use xmas_elf::program::{ProgramHeader, Type};
+use xmas_elf::program::ProgramHeader;
 
 use crate::error::Error;
 
@@ -83,33 +83,33 @@ impl Kernel<'_> {
 
     /// Returns the size of the kernel in memory.
     pub fn mem_size(&self) -> u64 {
-        let max_addr = self
-            .loadable_program_headers()
-            .map(|ph| ph.virtual_addr() + ph.mem_size())
-            .max()
-            .unwrap_or(0);
-
-        let min_addr = self
-            .loadable_program_headers()
-            .map(|ph| ph.virtual_addr())
-            .min()
-            .unwrap_or(0);
-
-        max_addr - min_addr
+        // Heuristically consider segments with page-size or larger alignment as LOAD
+        let mut min_addr = u64::MAX;
+        let mut max_addr = 0u64;
+        for ph in self.elf_file.program_iter() {
+            let align = ph.align();
+            let mem = ph.mem_size();
+            if mem == 0 || align < crate::arch::PAGE_SIZE as u64 {
+                continue;
+            }
+            let v = ph.virtual_addr();
+            min_addr = core::cmp::min(min_addr, v);
+            max_addr = core::cmp::max(max_addr, v.saturating_add(mem));
+        }
+        if min_addr == u64::MAX { 0 } else { max_addr.saturating_sub(min_addr) }
     }
 
     /// Returns the largest alignment of any loadable segment in the kernel and by extension
     /// the overall alignment for the kernel.
     pub fn max_align(&self) -> u64 {
-        let load_program_headers = self.loadable_program_headers();
-
-        load_program_headers.map(|ph| ph.align()).max().unwrap_or(1)
-    }
-
-    fn loadable_program_headers(&self) -> impl Iterator<Item = ProgramHeader<'_>> + '_ {
-        self.elf_file
-            .program_iter()
-            .filter(|ph| ph.get_type().unwrap() == Type::Load)
+        let mut max_align = 1u64;
+        for ph in self.elf_file.program_iter() {
+            let align = ph.align();
+            if ph.mem_size() > 0 && align > max_align {
+                max_align = align;
+            }
+        }
+        max_align
     }
 }
 

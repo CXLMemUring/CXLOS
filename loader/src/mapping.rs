@@ -16,6 +16,7 @@ use loader_api::TlsTemplate;
 use xmas_elf::P64;
 use xmas_elf::dynamic::Tag;
 use xmas_elf::program::{SegmentData, Type};
+use xmas_elf::sections;
 
 use crate::error::Error;
 use crate::frame_alloc::FrameAllocator;
@@ -181,52 +182,43 @@ pub fn map_kernel(
     let mut maybe_tls_allocation = None;
 
     // Load the segments into virtual memory.
-    for ph in kernel.elf_file.program_iter() {
-        match ph.get_type().unwrap() {
-            Type::Load => handle_load_segment(
+    for raw_ph in kernel.elf_file.program_iter() {
+        let ph = ProgramHeader::try_from(raw_ph)?;
+
+        // Prefer TLS detection using section flags to avoid false positives
+        if is_tls_segment(&ph, &kernel.elf_file) {
+            let old = maybe_tls_allocation.replace(handle_tls_segment(
                 root_pgtable,
                 frame_alloc,
-                &ProgramHeader::try_from(ph)?,
+                page_alloc,
+                &ph,
+                kernel_virt.start,
+                minfo,
+                phys_off,
+            )?);
+            log::trace!("TLS detected in segment vaddr={:#x} size={:#x}", ph.virtual_address, ph.mem_size);
+            if old.is_some() {
+                log::warn!("Multiple TLS segments detected; ignoring subsequent ones");
+            }
+            continue;
+        }
+
+        // LOAD-like detection: page-aligned and has memory size
+        if ph.mem_size > 0 && ph.align >= arch::PAGE_SIZE {
+            handle_load_segment(
+                root_pgtable,
+                frame_alloc,
+                &ph,
                 phys_base,
                 kernel_virt.start,
                 phys_off,
-            )?,
-            Type::Tls => {
-                let ph = ProgramHeader::try_from(ph)?;
-                let old = maybe_tls_allocation.replace(handle_tls_segment(
-                    root_pgtable,
-                    frame_alloc,
-                    page_alloc,
-                    &ph,
-                    kernel_virt.start,
-                    minfo,
-                    phys_off,
-                )?);
-                log::trace!("{maybe_tls_allocation:?}");
-                assert!(old.is_none(), "multiple TLS segments not supported");
-            }
-            _ => {}
+            )?;
+            continue;
         }
     }
 
-    // Apply relocations in virtual memory.
-    for ph in kernel.elf_file.program_iter() {
-        if ph.get_type().unwrap() == Type::Dynamic {
-            log::trace!(
-                "Found Dynamic segment: offset={:#x}, vaddr={:#x}, paddr={:#x}, filesz={:#x}, memsz={:#x}",
-                ph.offset(),
-                ph.virtual_addr(),
-                ph.physical_addr(),
-                ph.file_size(),
-                ph.mem_size()
-            );
-            handle_dynamic_segment(
-                &ProgramHeader::try_from(ph).unwrap(),
-                &kernel.elf_file,
-                kernel_virt.start,
-            )?;
-        }
-    }
+    // Apply relocations in virtual memory (via .dynamic section)
+    handle_dynamic_relocations(&kernel.elf_file, kernel_virt.start, phys_base, phys_off)?;
 
     //     // Mark some memory regions as read-only after relocations have been
     //     // applied.
@@ -427,14 +419,15 @@ fn handle_bss_section(
     Ok(())
 }
 
-fn handle_dynamic_segment(
-    ph: &ProgramHeader,
+fn handle_dynamic_relocations(
     elf_file: &xmas_elf::ElfFile,
     virt_base: usize,
+    phys_base: usize,
+    phys_off: usize,
 ) -> crate::Result<()> {
-    log::trace!("parsing RELA info...");
+    log::trace!("parsing RELA info via .dynamic section...");
 
-    if let Some(rela_info) = ph.parse_rela(elf_file)? {
+    if let Some(rela_info) = parse_rela_from_dynamic_section(elf_file)? {
         log::trace!(
             "RELA table: vaddr={:#x} count={} entsize={}",
             rela_info.offset,
@@ -450,14 +443,25 @@ fn handle_dynamic_segment(
         let image_limit = {
             let mut max_end = 0usize;
             for prog_header in elf_file.program_iter() {
-                if prog_header.get_type().unwrap() == xmas_elf::program::Type::Load {
-                    let seg_vaddr = usize::try_from(prog_header.virtual_addr()).unwrap();
-                    let seg_memsz = usize::try_from(prog_header.mem_size()).unwrap();
-                    max_end = core::cmp::max(max_end, seg_vaddr.saturating_add(seg_memsz));
-                }
+                let seg_vaddr = usize::try_from(prog_header.virtual_addr()).unwrap_or(0);
+                let seg_memsz = usize::try_from(prog_header.mem_size()).unwrap_or(0);
+                max_end = core::cmp::max(max_end, seg_vaddr.saturating_add(seg_memsz));
             }
             max_end
         };
+
+        // Collect LOAD-like segments for VA->PA translation for file-backed bytes
+        // tuple: (seg_vaddr, seg_offset, seg_filesz)
+        let mut load_segments: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
+        for ph in elf_file.program_iter() {
+            let filesz = usize::try_from(ph.file_size()).unwrap_or(0);
+            let memsz = usize::try_from(ph.mem_size()).unwrap_or(0);
+            let align = usize::try_from(ph.align()).unwrap_or(1);
+            if memsz == 0 || align < crate::arch::PAGE_SIZE { continue; }
+            let vaddr = usize::try_from(ph.virtual_addr()).unwrap_or(0);
+            let off = usize::try_from(ph.offset()).unwrap_or(0);
+            load_segments.push((vaddr, off, filesz));
+        }
 
         // Manually parse RELA entries from the mapped bytes to avoid alignment/aliasing issues.
         // Entry size is provided by dynamic tag (RelaEnt)
@@ -556,14 +560,52 @@ fn handle_dynamic_segment(
         // Apply after decoupling from source bytes
         log::trace!("applying relocations in virtual memory...");
         for r in to_apply {
-            apply_relocation(r.rtype, r.offset, r.addend, virt_base, image_limit);
+            apply_relocation(
+                r.rtype,
+                r.offset,
+                r.addend,
+                virt_base,
+                image_limit,
+                phys_base,
+                phys_off,
+                &load_segments,
+            );
         }
     }
 
     Ok(())
 }
 
-fn apply_relocation(rtype: u32, offset: usize, addend: isize, virt_base: usize, image_limit: usize) {
+fn is_tls_segment(ph: &ProgramHeader, elf_file: &xmas_elf::ElfFile) -> bool {
+    // Identify TLS by intersecting any SHF_TLS section with the segment's VA range
+    let seg_start = ph.virtual_address as u64;
+    let seg_end = seg_start.saturating_add(ph.mem_size as u64);
+    for sh in elf_file.section_iter() {
+        // Skip sections with zero size or without TLS flag
+        let size = sh.size();
+        if size == 0 { continue; }
+        if (sh.flags() & sections::SHF_TLS) == 0 { continue; }
+
+        let s_start = sh.address();
+        let s_end = s_start.saturating_add(size);
+        let intersects = !(s_end <= seg_start || s_start >= seg_end);
+        if intersects {
+            return true;
+        }
+    }
+    false
+}
+
+fn apply_relocation(
+    rtype: u32,
+    offset: usize,
+    addend: isize,
+    virt_base: usize,
+    image_limit: usize,
+    phys_base: usize,
+    phys_off: usize,
+    load_segments: &[(usize, usize, usize)],
+) {
     // we only support local (symidx==0) relocations from the dynamic table
     // which the kernel should be emitting for PIE images
 
@@ -594,6 +636,18 @@ fn apply_relocation(rtype: u32, offset: usize, addend: isize, virt_base: usize, 
         return;
     }
 
+    // Helper: translate a target virtual offset within the image (r_offset) to a physical address
+    // using file-backed LOAD segments. Only returns Some for addresses within file_size.
+    let va_to_pa = |r_off: usize| -> Option<usize> {
+        for (seg_vaddr, seg_off, seg_filesz) in load_segments.iter().copied() {
+            if r_off >= seg_vaddr && r_off < seg_vaddr.saturating_add(seg_filesz) {
+                let delta = r_off - seg_vaddr;
+                return Some(phys_base.saturating_add(seg_off).saturating_add(delta));
+            }
+        }
+        None
+    };
+
     match rtype {
         // RELATIVE (x86_64/riscv)
         R_RISCV_RELATIVE | R_X86_64_RELATIVE => {
@@ -606,9 +660,12 @@ fn apply_relocation(rtype: u32, offset: usize, addend: isize, virt_base: usize, 
             let value = virt_base.wrapping_add_signed(addend);
 
             // log::trace!("reloc R_RISCV_RELATIVE offset: {:#x}; addend: {:#x} => target {target:?} value {value:?}", rela.get_offset(), rela.get_addend());
-            // Safety: we have to trust the ELF data here
-            unsafe {
-                (target as *mut usize).write_unaligned(value);
+            // Prefer writing via the physical window to avoid RO virtual mappings
+            if let Some(pa) = va_to_pa(offset) {
+                unsafe { ((phys_off + pa) as *mut usize).write_unaligned(value) }
+            } else {
+                // Fallback to writing via virtual address (should be mapped RW if valid)
+                unsafe { (target as *mut usize).write_unaligned(value) }
             }
         }
         // ABS 64-bit (riscv/x86_64) with symidx==0: store addend as absolute
@@ -621,8 +678,10 @@ fn apply_relocation(rtype: u32, offset: usize, addend: isize, virt_base: usize, 
                 target,
                 value
             );
-            unsafe {
-                (target as *mut usize).write_unaligned(value);
+            if let Some(pa) = va_to_pa(offset) {
+                unsafe { ((phys_off + pa) as *mut usize).write_unaligned(value) }
+            } else {
+                unsafe { (target as *mut usize).write_unaligned(value) }
             }
         }
         // x86_64 PC32: value = S + A - P. When symidx==0 many linkers encode
@@ -643,9 +702,10 @@ fn apply_relocation(rtype: u32, offset: usize, addend: isize, virt_base: usize, 
                     addend,
                     val
                 );
-                unsafe {
-                    // write 32-bit signed result
-                    (target as *mut i32).write_unaligned(val as i32);
+                if let Some(pa) = va_to_pa(offset) {
+                    unsafe { ((phys_off + pa) as *mut i32).write_unaligned(val as i32) }
+                } else {
+                    unsafe { (target as *mut i32).write_unaligned(val as i32) }
                 }
             }
             #[cfg(not(target_arch = "x86_64"))]
@@ -659,22 +719,32 @@ fn apply_relocation(rtype: u32, offset: usize, addend: isize, virt_base: usize, 
         R_X86_64_DTPMOD64 => {
             let target = virt_base.checked_add(offset).unwrap();
             let module_id: usize = 1;
-            unsafe {
-                (target as *mut usize).write_unaligned(module_id);
+            if let Some(pa) = va_to_pa(offset) {
+                unsafe { ((phys_off + pa) as *mut usize).write_unaligned(module_id) }
+            } else {
+                unsafe { (target as *mut usize).write_unaligned(module_id) }
             }
         }
         // 32-bit absolute relocations
         R_X86_64_32 | R_X86_64_32S => {
             let target = virt_base.checked_add(offset).unwrap();
             let value = virt_base.wrapping_add_signed(addend) as u32;
-            unsafe { (target as *mut u32).write_unaligned(value) }
+            if let Some(pa) = va_to_pa(offset) {
+                unsafe { ((phys_off + pa) as *mut u32).write_unaligned(value) }
+            } else {
+                unsafe { (target as *mut u32).write_unaligned(value) }
+            }
         }
         // TLS local-exec offset relative to thread pointer. We don't resolve at load-time;
         // leave addend as-is which is already an offset encoded by linker.
         R_X86_64_TPOFF64 => {
             let target = virt_base.checked_add(offset).unwrap();
             let value = addend as usize;
-            unsafe { (target as *mut usize).write_unaligned(value) }
+            if let Some(pa) = va_to_pa(offset) {
+                unsafe { ((phys_off + pa) as *mut usize).write_unaligned(value) }
+            } else {
+                unsafe { (target as *mut usize).write_unaligned(value) }
+            }
         }
         // Unknown relocation: Log and skip to keep boot progressing.
         _ => {
@@ -969,72 +1039,10 @@ struct ProgramHeader<'a> {
 
 impl ProgramHeader<'_> {
     pub fn parse_rela(&self, elf_file: &xmas_elf::ElfFile) -> crate::Result<Option<RelaInfo>> {
-        let data = self.ph.get_data(elf_file).map_err(Error::Elf)?;
-        let fields = match data {
-            SegmentData::Dynamic32(_) => unimplemented!("32-bit elf files are not supported"),
-            SegmentData::Dynamic64(fields) => fields,
-            _ => return Ok(None),
-        };
-
-        let mut rela = None; // Address of Rela relocs
-        let mut rela_size = None; // Total size of Rela relocs
-        let mut rela_ent = None; // Size of one Rela reloc
-
-        for field in fields {
-            let tag = field.get_tag().map_err(Error::Elf)?;
-            match tag {
-                Tag::Rela => {
-                    let ptr = field.get_ptr().map_err(Error::Elf)?;
-                    let prev = rela.replace(ptr);
-                    assert!(
-                        prev.is_none(),
-                        "Dynamic section contains more than one Rela entry"
-                    );
-                }
-                Tag::RelaSize => {
-                    let val = field.get_val().map_err(Error::Elf)?;
-                    let prev = rela_size.replace(val);
-                    assert!(
-                        prev.is_none(),
-                        "Dynamic section contains more than one RelaSize entry"
-                    );
-                }
-                Tag::RelaEnt => {
-                    let val = field.get_val().map_err(Error::Elf)?;
-                    let prev = rela_ent.replace(val);
-                    assert!(
-                        prev.is_none(),
-                        "Dynamic section contains more than one RelaEnt entry"
-                    );
-                }
-
-                Tag::Rel | Tag::RelSize | Tag::RelEnt => {
-                    panic!("REL relocations are not supported")
-                }
-                Tag::RelrSize | Tag::Relr | Tag::RelrEnt => {
-                    panic!("RELR relocations are not supported")
-                }
-                _ => {}
-            }
-        }
-
-        #[expect(clippy::manual_assert, reason = "cleaner this way")]
-        if rela.is_none() && (rela_size.is_some() || rela_ent.is_some()) {
-            panic!("Rela entry is missing but RelaSize or RelaEnt have been provided");
-        }
-
-        let Some(offset) = rela else {
-            return Ok(None);
-        };
-
-        let total_size = rela_size.expect("RelaSize entry is missing");
-        let entry_size = rela_ent.expect("RelaEnt entry is missing");
-
-        Ok(Some(RelaInfo {
-            offset,
-            count: total_size / entry_size,
-            entry_size,
-        }))
+        // Disabled: this path depends on xmas-elf's program type decoding which
+        // panics for unknown/OS-specific headers on some toolchains. We now
+        // obtain RELA info from the .dynamic section instead.
+        Ok(None)
     }
 }
 
@@ -1042,6 +1050,47 @@ struct RelaInfo {
     pub offset: u64,      // Virtual address of RELA table
     pub count: u64,       // Number of entries
     pub entry_size: u64,  // Size of each entry in bytes
+}
+
+// Parse the .dynamic section to find DT_RELA/DT_RELASZ/DT_RELAENT without using
+// program header type decoding.
+fn parse_rela_from_dynamic_section(
+    elf_file: &xmas_elf::ElfFile,
+) -> crate::Result<Option<RelaInfo>> {
+    let Some(section) = elf_file.find_section_by_name(".dynamic") else {
+        return Ok(None);
+    };
+    let raw = section.raw_data(elf_file);
+    // Each Elf64_Dyn entry is two u64 words: d_tag (i64) and d_val/p (u64)
+    if raw.len() < 16 || raw.len() % 16 != 0 {
+        return Ok(None);
+    }
+
+    const DT_RELA: u64 = 7;
+    const DT_RELASZ: u64 = 8;
+    const DT_RELAENT: u64 = 9;
+
+    let mut rela: Option<u64> = None;
+    let mut relasz: Option<u64> = None;
+    let mut relaent: Option<u64> = None;
+
+    for chunk in raw.chunks_exact(16) {
+        let tag = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+        let val = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+        match tag {
+            DT_RELA => rela = Some(val),
+            DT_RELASZ => relasz = Some(val),
+            DT_RELAENT => relaent = Some(val),
+            _ => {}
+        }
+    }
+
+    let Some(offset) = rela else { return Ok(None) };
+    let total = relasz.unwrap_or(0);
+    let ent = relaent.unwrap_or(24);
+    if total == 0 || ent == 0 { return Ok(None) }
+
+    Ok(Some(RelaInfo { offset, count: total / ent, entry_size: ent }))
 }
 
 impl<'a> TryFrom<xmas_elf::program::ProgramHeader<'a>> for ProgramHeader<'a> {

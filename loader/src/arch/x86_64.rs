@@ -260,10 +260,14 @@ pub unsafe fn handoff_to_kernel(cpuid: usize, boot_ticks: u64, init: &GlobalInit
             // so the callee observes rsp%16==8 (due to the pushed return address).
             "call {kernel_entry}",
 
-            // The kernel should never return. If it does, halt this CPU.
+            // The kernel should never return. If it does, emit a byte on COM1 and hand off to a guard.
             "2:",
-            "   hlt",
-            "   jmp 2b",
+            // emit 'R' on COM1 to mark unexpected return
+            "   mov dx, 0x3F8",
+            "   mov al, 0x52", // 'R'
+            "   out dx, al",
+            // call guard that logs and halts
+            "   call {handoff_ret}",
 
             cpuid = in(reg) cpuid,
             boot_info = in(reg) init.boot_info as usize,
@@ -273,8 +277,19 @@ pub unsafe fn handoff_to_kernel(cpuid: usize, boot_ticks: u64, init: &GlobalInit
             tls_start = in(reg) tls.start,
             kernel_entry = in(reg) init.kernel_entry,
             fill_stack = sym fill_stack,
+            handoff_ret = sym handoff_returned,
             options(noreturn)
         }
+    }
+}
+
+#[cold]
+#[inline(never)]
+unsafe extern "C" fn handoff_returned() -> ! {
+    // Log via logger (if still alive) and then halt forever
+    log::error!("Kernel entry returned unexpectedly; halting CPU");
+    loop {
+        core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
     }
 }
 

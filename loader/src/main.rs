@@ -91,6 +91,14 @@ unsafe fn main(hartid: usize, opaque: *const c_void, boot_ticks: u64) -> ! {
         alloc.initialize_for_hart(hartid);
     }
 
+    // Extra trace before handoff to help diagnose pre-handoff failures
+    log::info!(
+        "Handoff: cpu={} entry={:#x} boot_info={:?}",
+        hartid,
+        res.kernel_entry,
+        res.boot_info
+    );
+
     // Safety: this will jump to the kernel entry
     unsafe { arch::handoff_to_kernel(hartid, boot_ticks, res) }
 }
