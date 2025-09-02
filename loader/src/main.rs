@@ -88,7 +88,16 @@ unsafe fn main(hartid: usize, opaque: *const c_void, boot_ticks: u64) -> ! {
             }
         }
 
+        log::trace!(
+            "TLS init: hart={} region={:#x?} file_size={} mem_size={} align={}",
+            hartid,
+            region,
+            alloc.template.file_size,
+            alloc.template.mem_size,
+            alloc.template.align
+        );
         alloc.initialize_for_hart(hartid);
+        log::trace!("TLS init complete: hart={}", hartid);
     }
 
     // Extra trace before handoff to help diagnose pre-handoff failures

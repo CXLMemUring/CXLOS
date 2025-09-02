@@ -193,6 +193,7 @@ pub fn map_kernel(
                 page_alloc,
                 &ph,
                 kernel_virt.start,
+                phys_base,
                 minfo,
                 phys_off,
             )?);
@@ -764,7 +765,8 @@ fn handle_tls_segment(
     frame_alloc: &mut FrameAllocator,
     page_alloc: &mut PageAllocator,
     ph: &ProgramHeader,
-    virt_base: usize,
+    _virt_base: usize,
+    phys_base: usize,
     minfo: &MachineInfo,
     phys_off: usize,
 ) -> crate::Result<TlsAllocation> {
@@ -827,10 +829,25 @@ fn handle_tls_segment(
         virt_start += len.get();
     }
 
+    // Compute source address of TLS initializer bytes from the ELF file buffer.
+    // PT_TLS data lives in the file image and is not mapped into the kernel's virtual image.
+    let template_src = {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Kernel ELF is identity-mapped, read directly from file buffer
+            phys_base.checked_add(ph.offset).unwrap()
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            // Kernel ELF must be accessed through the physical window after MMU
+            phys_off.checked_add(phys_base).unwrap().checked_add(ph.offset).unwrap()
+        }
+    };
+
     Ok(TlsAllocation {
         virt,
         template: TlsTemplate {
-            start_addr: virt_base + ph.virtual_address,
+            start_addr: template_src,
             mem_size: ph.mem_size,
             file_size: ph.file_size,
             align: ph.align,
@@ -873,6 +890,7 @@ impl TlsAllocation {
 
     pub fn initialize_for_hart(&self, hartid: usize) {
         let region = self.region_for_hart(hartid);
+        log::trace!("TLS: hart={} region={:#x?}", hartid, region);
 
         // Safety: We have to trust the loaders BootInfo here
         unsafe {
@@ -892,6 +910,13 @@ impl TlsAllocation {
 
             // First, copy the initialized data if any
             if self.template.file_size != 0 {
+                log::trace!(
+                    "TLS copy: hart={} src={:#x} -> dst={:#x} size={}",
+                    hartid,
+                    self.template.start_addr,
+                    region.start,
+                    self.template.file_size
+                );
                 let src: &[u8] = slice::from_raw_parts(
                     self.template.start_addr as *const u8,
                     self.template.file_size,
@@ -923,12 +948,19 @@ impl TlsAllocation {
                 }
 
                 dst.copy_from_slice(src);
+                log::trace!("TLS copy complete: hart={}", hartid);
             }
 
             // Then zero the BSS section (from file_size to mem_size)
             if self.template.mem_size > self.template.file_size {
                 let bss_start = region.start + self.template.file_size;
                 let bss_size = self.template.mem_size - self.template.file_size;
+                log::trace!(
+                    "TLS BSS zero: hart={} start={:#x} size={}",
+                    hartid,
+                    bss_start,
+                    bss_size
+                );
                 let bss: &mut [u8] = slice::from_raw_parts_mut(bss_start as *mut u8, bss_size);
                 bss.fill(0);
             }
@@ -942,6 +974,8 @@ impl TlsAllocation {
                     *tls_base_ptr = region.start;
                 }
             }
+
+            log::trace!("TLS init done: hart={}", hartid);
         }
     }
 }
