@@ -134,3 +134,45 @@ impl fmt::Display for Kernel<'_> {
         Ok(())
     }
 }
+
+/// Debug helper: return first 16 file bytes at the kernel entry's file offset.
+/// Also returns the computed file offset for logging.
+pub fn dbg_entry_file_bytes(entry_va: usize) -> Option<([u8; 16], usize)> {
+    // Obtain inlined kernel bytes (identity-mapped on x86_64)
+    let kernel_ptr = INLINED_KERNEL_BYTES.0.as_ptr();
+    let bytes = unsafe { slice::from_raw_parts(kernel_ptr, INLINED_KERNEL_BYTES.0.len()) };
+
+    let elf = xmas_elf::ElfFile::new(bytes).ok()?;
+    let elf_entry = usize::try_from(elf.header.pt2.entry_point()).ok()?;
+
+    // Determine image-relative VA for entry
+    let image_rva = if elf_entry >= crate::arch::KERNEL_ASPACE_BASE {
+        // Linked-at-VA image: RELA and phdr vaddrs are absolute; use given VA
+        entry_va
+    } else {
+        // PIE image: entry is encoded as image-relative VA in ELF header
+        elf_entry
+    };
+
+    // Find a LOAD-like segment whose file-backed range contains the entry
+    for ph in elf.program_iter() {
+        let vaddr = usize::try_from(ph.virtual_addr()).ok()?;
+        let filesz = usize::try_from(ph.file_size()).ok()?;
+        let memsz = usize::try_from(ph.mem_size()).ok()?;
+        let align = usize::try_from(ph.align()).ok()?;
+        if memsz == 0 || align < crate::arch::PAGE_SIZE || filesz == 0 {
+            continue;
+        }
+        if image_rva >= vaddr && image_rva < vaddr.saturating_add(filesz) {
+            let off = usize::try_from(ph.offset()).ok()?;
+            let file_off = off + (image_rva - vaddr);
+            if file_off >= bytes.len() { return None; }
+            let mut out = [0u8; 16];
+            let avail = core::cmp::min(16, bytes.len().saturating_sub(file_off));
+            out[..avail].copy_from_slice(&bytes[file_off..file_off + avail]);
+            return Some((out, file_off));
+        }
+    }
+
+    None
+}

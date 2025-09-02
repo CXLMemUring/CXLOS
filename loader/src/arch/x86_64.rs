@@ -16,6 +16,8 @@ use crate::GlobalInitResult;
 use crate::frame_alloc::FrameAllocator;
 use crate::machine_info::MachineInfo;
 use crate::mapping::Flags;
+use crate::kernel;
+use loader_api::BootInfo;
 
 // PVH ELF Note to enable direct kernel loading like RISC-V
 // This allows QEMU to boot our kernel directly without a traditional bootloader
@@ -223,6 +225,45 @@ pub unsafe fn handoff_to_kernel(cpuid: usize, boot_ticks: u64, init: &GlobalInit
         init.boot_info
     );
 
+    // Diagnostics: dump PTE chain/flags for kernel entry VA and first bytes from VA vs ELF file
+    let bi = unsafe { &*(init.boot_info as *const BootInfo) };
+    let phys_off = bi.physical_address_offset;
+    dbg_dump_mapping(init.root_pgtable, init.kernel_entry, phys_off);
+    // Ensure the entry page is executable in case segment flags were conservative
+    if let Err(e) = unsafe { force_exec_for_va(init.root_pgtable, init.kernel_entry, phys_off) } {
+        log::warn!("Could not ensure exec permission for entry: {}", e);
+    }
+    let mut call_target: Option<usize> = None;
+    unsafe {
+        let mut va_bytes = [0u8; 16];
+        core::ptr::copy_nonoverlapping(init.kernel_entry as *const u8, va_bytes.as_mut_ptr(), 16);
+        log::trace!("Entry VA bytes: {:02x?}", &va_bytes);
+        // Decode near CALL rel32 to get first branch target (e.g., _rust_start)
+        if va_bytes[0] == 0xE8 {
+            let disp = i32::from_le_bytes([va_bytes[1], va_bytes[2], va_bytes[3], va_bytes[4]]) as isize;
+            let target = (init.kernel_entry as isize).wrapping_add(5).wrapping_add(disp) as usize;
+            call_target = Some(target);
+            log::trace!("Entry CALL target: {:#x}", target);
+            dbg_dump_mapping(init.root_pgtable, target, phys_off);
+            if let Err(e) = force_exec_for_va(init.root_pgtable, target, phys_off) {
+                log::warn!("Could not ensure exec for CALL target: {}", e);
+            }
+        }
+    }
+    if let Some((file_bytes, file_off)) = kernel::dbg_entry_file_bytes(init.kernel_entry) {
+        log::trace!(
+            "Entry file bytes @off {:#x}: {:02x?}",
+            file_off,
+            &file_bytes
+        );
+    } else {
+        // This is expected when entry lies in a LOAD segment area that is not file-backed
+        // (memsz > filesz), e.g. due to alignment/zero fill. We already logged VA bytes above.
+        log::trace!(
+            "Entry not in file-backed bytes (outside LOAD.filesz but within mem). Using VA bytes."
+        );
+    }
+
     init.barrier.wait();
 
     unsafe {
@@ -256,12 +297,17 @@ pub unsafe fn handoff_to_kernel(cpuid: usize, boot_ticks: u64, init: &GlobalInit
             // Clear return address
             "xor rax, rax",
 
-            // Call into kernel entry with System V ABI stack alignment
-            // so the callee observes rsp%16==8 (due to the pushed return address).
+            // Ensure System V ABI stack alignment:
+            // The callee expects 16-byte alignment on entry. Since CALL pushes the return
+            // address, rsp must be 16n+8 before CALL so inside callee it becomes 16n.
+            "sub rsp, 8",
+            // Call into kernel entry
             "call {kernel_entry}",
 
             // The kernel should never return. If it does, emit a byte on COM1 and hand off to a guard.
             "2:",
+            // Balance the stack adjustment if we ever return here
+            "   add rsp, 8",
             // emit 'R' on COM1 to mark unexpected return
             "   mov dx, 0x3F8",
             "   mov al, 0x52", // 'R'
@@ -448,6 +494,77 @@ pub fn can_map_at_level(virt: usize, phys: usize, remaining_bytes: usize, lvl: u
 
 fn pgtable_ptr_from_phys(phys: usize, phys_off: usize) -> NonNull<PageTableEntry> {
     NonNull::new(phys_off.checked_add(phys).unwrap() as *mut PageTableEntry).unwrap()
+}
+
+fn dbg_dump_mapping(root_pgtable: usize, va: usize, phys_off: usize) {
+    // Walk levels 3..0 logging each PTE
+    unsafe {
+        let mut table = pgtable_ptr_from_phys(root_pgtable, phys_off);
+        for lvl in (0..PAGE_TABLE_LEVELS).rev() {
+            let idx = pte_index_for_level(va, lvl);
+            let pte = table.as_ptr().add(idx).as_ref().unwrap();
+            let (addr, flags) = pte.get_address_and_flags();
+            log::trace!(
+                "VA {:#x} L{}[{}] PTE addr={:#x} flags={:?}",
+                va,
+                lvl,
+                idx,
+                addr,
+                flags
+            );
+
+            if !pte.is_valid() {
+                log::error!("Mapping invalid at level {} for VA {:#x}", lvl, va);
+                return;
+            }
+            if pte.is_leaf(lvl) {
+                let exec = !flags.contains(PTEFlags::NX);
+                let write = flags.contains(PTEFlags::WRITABLE);
+                log::trace!(
+                    "Leaf at L{}: exec={} write={} global={} huge={}",
+                    lvl,
+                    exec,
+                    write,
+                    flags.contains(PTEFlags::GLOBAL),
+                    flags.contains(PTEFlags::HUGE)
+                );
+                return;
+            }
+            table = pgtable_ptr_from_phys(addr, phys_off);
+        }
+    }
+}
+
+/// Walk the page tables to the leaf that backs `va` and clear NX so the page is executable.
+fn force_exec_for_va(root_pgtable: usize, va: usize, phys_off: usize) -> Result<(), &'static str> {
+    unsafe {
+        let mut table = pgtable_ptr_from_phys(root_pgtable, phys_off);
+        for lvl in (0..PAGE_TABLE_LEVELS).rev() {
+            let idx = pte_index_for_level(va, lvl);
+            let pte = table.as_ptr().add(idx).as_mut().ok_or("bad PTE pointer")?;
+            if !pte.is_valid() {
+                return Err("mapping invalid");
+            }
+            if pte.is_leaf(lvl) {
+                let (addr, mut flags) = pte.get_address_and_flags();
+                if flags.contains(PTEFlags::NX) {
+                    flags.remove(PTEFlags::NX);
+                    pte.replace_address_and_flags(addr, flags);
+                    log::trace!(
+                        "force_exec: cleared NX at L{} for VA {:#x} -> PA {:#x} flags={:?}",
+                        lvl,
+                        va,
+                        addr,
+                        flags
+                    );
+                }
+                return Ok(());
+            }
+            let (next_phys, _) = pte.get_address_and_flags();
+            table = pgtable_ptr_from_phys(next_phys, phys_off);
+        }
+        Err("no leaf found")
+    }
 }
 
 #[repr(transparent)]

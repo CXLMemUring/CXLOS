@@ -153,14 +153,39 @@ pub fn map_kernel(
     minfo: &MachineInfo,
     phys_off: usize,
 ) -> crate::Result<(Range<usize>, Option<TlsAllocation>)> {
-    let kernel_virt = page_alloc.allocate(
-        Layout::from_size_align(
-            usize::try_from(kernel.mem_size())?,
-            usize::try_from(kernel.max_align())?,
-        )
-        .unwrap(),
-    );
-    log::trace!("map_kernel: Allocated virtual range {:#x?}", kernel_virt);
+    // Determine if the kernel is linked-at-VA (high canonical VAs) or PIE/relocatable
+    let mut min_vaddr = usize::MAX;
+    let mut max_vaddr = 0usize;
+    for ph in kernel.elf_file.program_iter() {
+        let mem = usize::try_from(ph.mem_size()).unwrap_or(0);
+        let align = usize::try_from(ph.align()).unwrap_or(1);
+        if mem == 0 || align < crate::arch::PAGE_SIZE { continue; }
+        let v = usize::try_from(ph.virtual_addr()).unwrap_or(0);
+        min_vaddr = core::cmp::min(min_vaddr, v);
+        max_vaddr = core::cmp::max(max_vaddr, v.saturating_add(mem));
+    }
+
+    let linked_at_va = min_vaddr >= arch::KERNEL_ASPACE_BASE;
+    let (kernel_virt, virt_base_for_map) = if linked_at_va {
+        // Map directly at the kernel's linked virtual addresses
+        let start = align_down(min_vaddr, usize::try_from(kernel.max_align())?);
+        let end = checked_align_up(max_vaddr, usize::try_from(kernel.max_align())?).unwrap();
+        let range = Range::from(start..end);
+        log::trace!("map_kernel: Linked-at-VA. Using direct virtual range {:#x?}", range);
+        (range, 0usize)
+    } else {
+        // Allocate a virtual base for the image and map segments relative to it
+        let range = page_alloc
+            .allocate(
+                Layout::from_size_align(
+                    usize::try_from(kernel.mem_size())?,
+                    usize::try_from(kernel.max_align())?,
+                )
+                .unwrap(),
+            );
+        log::trace!("map_kernel: PIE image. Allocated virtual range {:#x?}", range);
+        (range, range.start)
+    };
 
     log::trace!("map_kernel: Getting phys_base");
     let phys_base = if cfg!(target_arch = "x86_64") {
@@ -181,6 +206,10 @@ pub fn map_kernel(
 
     let mut maybe_tls_allocation = None;
 
+    // Compute the effective entry VA for mapping (linked-at-VA vs PIE)
+    let elf_entry = usize::try_from(kernel.elf_file.header.pt2.entry_point())?;
+    let entry_va = if linked_at_va { elf_entry } else { virt_base_for_map.checked_add(elf_entry).unwrap() };
+
     // Load the segments into virtual memory.
     for raw_ph in kernel.elf_file.program_iter() {
         let ph = ProgramHeader::try_from(raw_ph)?;
@@ -192,7 +221,7 @@ pub fn map_kernel(
                 frame_alloc,
                 page_alloc,
                 &ph,
-                kernel_virt.start,
+                virt_base_for_map,
                 phys_base,
                 minfo,
                 phys_off,
@@ -206,20 +235,28 @@ pub fn map_kernel(
 
         // LOAD-like detection: page-aligned and has memory size
         if ph.mem_size > 0 && ph.align >= arch::PAGE_SIZE {
+            // Determine if this segment contains the chosen entry; if so, force EXEC
+            let seg_start = virt_base_for_map.checked_add(ph.virtual_address).unwrap();
+            let seg_end = seg_start.checked_add(ph.mem_size).unwrap();
+            let force_exec = entry_va >= seg_start && entry_va < seg_end;
             handle_load_segment(
                 root_pgtable,
                 frame_alloc,
                 &ph,
                 phys_base,
-                kernel_virt.start,
+                virt_base_for_map,
                 phys_off,
+                force_exec,
             )?;
             continue;
         }
     }
 
     // Apply relocations in virtual memory (via .dynamic section)
-    handle_dynamic_relocations(&kernel.elf_file, kernel_virt.start, phys_base, phys_off)?;
+    // Use virt_base_for_map so RELA offsets are interpreted correctly:
+    //  - linked-at-VA: base 0, RELA gives absolute VA
+    //  - PIE: base = allocated image start, RELA gives image-relative VA
+    handle_dynamic_relocations(&kernel.elf_file, virt_base_for_map, phys_base, phys_off)?;
 
     //     // Mark some memory regions as read-only after relocations have been
     //     // applied.
@@ -245,8 +282,12 @@ fn handle_load_segment(
     phys_base: usize,
     virt_base: usize,
     phys_off: usize,
+    force_exec: bool,
 ) -> crate::Result<()> {
-    let flags = flags_for_segment(ph);
+    let mut flags = flags_for_segment(ph);
+    if force_exec {
+        flags |= Flags::EXECUTE;
+    }
 
     log::trace!(
         "Handling Segment: LOAD off {offset:#016x} vaddr {vaddr:#016x} align {align} filesz {filesz:#016x} memsz {memsz:#016x} flags {flags:?}",
@@ -257,18 +298,19 @@ fn handle_load_segment(
         memsz = ph.mem_size
     );
 
+    // Map file-backed bytes page-accurately to avoid over-aligning physical source
+    // which could point at unrelated data. Use 4KiB alignment for both sides.
     let phys = {
         let start = phys_base.checked_add(ph.offset).unwrap();
         let end = start.checked_add(ph.file_size).unwrap();
-
-        Range::from(align_down(start, ph.align)..checked_align_up(end, ph.align).unwrap())
+        Range::from(align_down(start, arch::PAGE_SIZE)..checked_align_up(end, arch::PAGE_SIZE).unwrap())
     };
 
     let virt = {
+        // If virt_base==0 we are mapping at linked VA; otherwise map at PIE base
         let start = virt_base.checked_add(ph.virtual_address).unwrap();
         let end = start.checked_add(ph.file_size).unwrap();
-
-        Range::from(align_down(start, ph.align)..checked_align_up(end, ph.align).unwrap())
+        Range::from(align_down(start, arch::PAGE_SIZE)..checked_align_up(end, arch::PAGE_SIZE).unwrap())
     };
 
     log::trace!("mapping {virt:#x?} => {phys:#x?}");
@@ -324,6 +366,7 @@ fn handle_bss_section(
     virt_base: usize,
     phys_off: usize,
 ) -> crate::Result<()> {
+    // If virt_base==0 we are mapping at linked VA; otherwise map at PIE base
     let virt_start = virt_base.checked_add(ph.virtual_address).unwrap();
     let zero_start = virt_start.checked_add(ph.file_size).unwrap();
     let zero_end = virt_start.checked_add(ph.mem_size).unwrap();
@@ -340,11 +383,11 @@ fn handle_bss_section(
             virt_start
                 .checked_add(ph.file_size.saturating_sub(1))
                 .unwrap(),
-            ph.align,
+            arch::PAGE_SIZE,
         );
         let last_frame = align_down(
             phys_base.checked_add(ph.offset + ph.file_size - 1).unwrap(),
-            ph.align,
+            arch::PAGE_SIZE,
         );
 
         let new_frame = frame_alloc.allocate_one_zeroed(arch::KERNEL_ASPACE_BASE)?;
@@ -382,8 +425,8 @@ fn handle_bss_section(
     let (mut virt, len) = {
         // zero_start either lies at a page boundary OR somewhere within the first page
         // by aligning up, we move it to the beginning of the *next* page.
-        let start = checked_align_up(zero_start, ph.align).unwrap();
-        let end = checked_align_up(zero_end, ph.align).unwrap();
+        let start = checked_align_up(zero_start, arch::PAGE_SIZE).unwrap();
+        let end = checked_align_up(zero_end, arch::PAGE_SIZE).unwrap();
         (start, end.checked_sub(start).unwrap())
     };
 
