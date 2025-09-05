@@ -220,13 +220,19 @@ pub unsafe fn handoff_to_kernel(cpuid: usize, boot_ticks: u64, init: &GlobalInit
 
     log::debug!("CPU {cpuid} Jumping to kernel...");
     log::trace!(
-        "CPU {cpuid} entry: {:#x}, arguments: rdi={cpuid} rsi={:?} stack={stack:#x?} tls={tls:#x?}",
+        "CPU {cpuid} entry: {:#x}, arguments: rdi={cpuid} rsi={:?} rdx={boot_ticks} stack={stack:#x?} tls={tls:#x?}",
         init.kernel_entry,
         init.boot_info
     );
-
+    
     // Diagnostics: dump PTE chain/flags for kernel entry VA and first bytes from VA vs ELF file
     let bi = unsafe { &*(init.boot_info as *const BootInfo) };
+    
+    // Log boot info details
+    log::debug!("BootInfo details:");
+    log::debug!("  physical_address_offset: {:#x}", bi.physical_address_offset);
+    log::debug!("  physical_memory_map: {:#x?}", bi.physical_memory_map);
+    
     let phys_off = bi.physical_address_offset;
     dbg_dump_mapping(init.root_pgtable, init.kernel_entry, phys_off);
     // Ensure the entry page is executable in case segment flags were conservative
@@ -305,15 +311,9 @@ pub unsafe fn handoff_to_kernel(cpuid: usize, boot_ticks: u64, init: &GlobalInit
             "call {kernel_entry}",
 
             // The kernel should never return. If it does, emit a byte on COM1 and hand off to a guard.
-            "2:",
-            // Balance the stack adjustment if we ever return here
-            "   add rsp, 8",
-            // emit 'R' on COM1 to mark unexpected return
-            "   mov dx, 0x3F8",
-            "   mov al, 0x52", // 'R'
-            "   out dx, al",
-            // call guard that logs and halts
-            "   call {handoff_ret}",
+            // "2:",
+            // // call guard that logs and halts
+            // "   call {handoff_ret}",
 
             cpuid = in(reg) cpuid,
             boot_info = in(reg) init.boot_info as usize,
@@ -323,7 +323,7 @@ pub unsafe fn handoff_to_kernel(cpuid: usize, boot_ticks: u64, init: &GlobalInit
             tls_start = in(reg) tls.start,
             kernel_entry = in(reg) init.kernel_entry,
             fill_stack = sym fill_stack,
-            handoff_ret = sym handoff_returned,
+            // handoff_ret = sym handoff_returned,
             options(noreturn)
         }
     }
@@ -591,12 +591,18 @@ impl PageTableEntry {
     }
 
     pub fn replace_address_and_flags(&mut self, address: usize, flags: PTEFlags) {
+        // Ensure address only uses bits 51:12 (physical address must be < 2^52)
+        debug_assert!(address < (1usize << 52), "Physical address {:#x} exceeds 52-bit limit", address);
+        // Clear and set bits properly
         self.bits = 0;
-        self.bits |= (address & !0xFFF) | flags.bits();
+        // Only use bits 51:0 of address (aligned to 4K), and OR with flags
+        self.bits = (address & 0x000FFFFFFFFFF000) | flags.bits();
     }
 
     pub fn get_address_and_flags(&self) -> (usize, PTEFlags) {
-        let addr = self.bits & !0xFFF;
+        // On x86_64, bits 51:12 contain the physical frame number
+        // Bits 63:52 and 11:0 contain flags
+        let addr = self.bits & 0x000FFFFFFFFFF000;  // Mask for bits 51:12
         let flags = PTEFlags::from_bits_truncate(self.bits);
         (addr, flags)
     }

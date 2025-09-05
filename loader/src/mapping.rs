@@ -188,17 +188,25 @@ pub fn map_kernel(
     };
 
     log::trace!("map_kernel: Getting phys_base");
-    let phys_base = if cfg!(target_arch = "x86_64") {
-        // On x86_64, the kernel ELF is accessed through identity mapping
-        kernel.elf_file.input.as_ptr() as usize
-    } else if cfg!(target_arch = "riscv64") {
-        // On RISC-V, the kernel ELF is accessed through physical memory mapping
-        kernel.elf_file.input.as_ptr() as usize - arch::KERNEL_ASPACE_BASE
+    // Get the physical address of the kernel ELF
+    // On x86_64: kernel ELF is identity-mapped, so pointer is physical address
+    // On RISC-V: after MMU, pointer is virtual (phys + phys_off), need to subtract
+    let phys_base = if cfg!(target_arch = "riscv64") && phys_off != 0 {
+        // RISC-V with MMU on: subtract offset to get physical address
+        (kernel.elf_file.input.as_ptr() as usize).checked_sub(phys_off).unwrap()
     } else {
-        panic!("Unsupported architecture");
+        // x86_64 (always identity mapped) or RISC-V before MMU
+        kernel.elf_file.input.as_ptr() as usize
     };
 
     log::trace!("map_kernel: phys_base={:#x}", phys_base);
+    
+    if phys_base >= 0x1000000000 {
+        log::error!("ERROR: phys_base is suspiciously high: {:#x}", phys_base);
+        log::error!("  kernel.elf_file.input.as_ptr() = {:p}", kernel.elf_file.input.as_ptr());
+        log::error!("  phys_off = {:#x}", phys_off);
+    }
+    
     assert!(
         phys_base.is_multiple_of(arch::PAGE_SIZE),
         "Loaded ELF file is not sufficiently aligned"
@@ -303,6 +311,20 @@ fn handle_load_segment(
     let phys = {
         let start = phys_base.checked_add(ph.offset).unwrap();
         let end = start.checked_add(ph.file_size).unwrap();
+        
+        // Debug: Check first few bytes at this physical location
+        if ph.virtual_address <= 0x2b8 && ph.virtual_address + ph.mem_size > 0x2b8 {
+            let entry_file_offset = ph.offset + (0x2b8 - ph.virtual_address);
+            log::trace!("Segment containing entry 0x2b8: offset={:#x} vaddr={:#x} filesz={:#x}", 
+                       ph.offset, ph.virtual_address, ph.file_size);
+            log::trace!("Entry point 0x2b8 is at file offset {:#x}", entry_file_offset);
+            unsafe {
+                let entry_ptr = (phys_base + entry_file_offset) as *const u8;
+                let entry_bytes: [u8; 16] = core::ptr::read_unaligned(entry_ptr as *const [u8; 16]);
+                log::trace!("Entry bytes at file offset {:#x}: {:02x?}", entry_file_offset, entry_bytes);
+            }
+        }
+        
         Range::from(align_down(start, arch::PAGE_SIZE)..checked_align_up(end, arch::PAGE_SIZE).unwrap())
     };
 
@@ -314,6 +336,13 @@ fn handle_load_segment(
     };
 
     log::trace!("mapping {virt:#x?} => {phys:#x?}");
+    
+    if phys.start >= 0x1000000000 || phys.end >= 0x1000000000 {
+        log::error!("ERROR: Suspicious physical address range: {:#x?}", phys);
+        log::error!("  phys_base={:#x}, ph.offset={:#x}, ph.file_size={:#x}", 
+                   phys_base, ph.offset, ph.file_size);
+    }
+    
     // Safety: Leaving the address space in an invalid state here is fine since on panic we'll
     // abort startup anyway
     unsafe {
@@ -324,7 +353,7 @@ fn handle_load_segment(
             phys.start,
             NonZeroUsize::new(phys.end.checked_sub(phys.start).unwrap()).unwrap(),
             flags,
-            arch::KERNEL_ASPACE_BASE,
+            phys_off,
         )?;
     }
 
@@ -589,14 +618,14 @@ fn handle_dynamic_relocations(
                 }
             }
 
-            log::trace!(
-                "RELA entry i={}: off={:#x} info={:#x} type={} addend={:#x}",
-                i,
-                r_offset,
-                r_info,
-                rtype,
-                addend
-            );
+            // log::trace!(
+            //     "RELA entry i={}: off={:#x} info={:#x} type={} addend={:#x}",
+            //     i,
+            //     r_offset,
+            //     r_info,
+            //     rtype,
+            //     addend
+            // );
 
             to_apply.push(Reloc { rtype, offset, addend });
         }
@@ -670,7 +699,18 @@ fn apply_relocation(
     const R_X86_64_32S: u32 = 11; // 32-bit sign-extended
     const R_X86_64_TPOFF64: u32 = 45; // TLS LE offset
 
-    log::trace!("reloc type={} offset={:#x} addend={:#x}", rtype, offset, addend);
+    // log::trace!("reloc type={} offset={:#x} addend={:#x}", rtype, offset, addend);
+    
+    // Skip relocations that would modify the ELF header or other metadata
+    // The first page contains the ELF header and program headers
+    if offset < 0x1000 {
+        log::warn!(
+            "Skipping relocation: target offset {:#x} would modify ELF header/metadata",
+            offset
+        );
+        return;
+    }
+    
     if offset >= image_limit {
         log::warn!(
             "Skipping relocation: target offset {:#x} beyond image limit {:#x}",

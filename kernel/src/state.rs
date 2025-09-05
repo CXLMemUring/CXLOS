@@ -26,7 +26,10 @@ cpu_local! {
 pub struct Global {
     pub executor: Executor,
     pub timer: Timer,
+    #[cfg(not(target_arch = "x86_64"))]
     pub device_tree: DeviceTree,
+    #[cfg(target_arch = "x86_64")]
+    pub device_tree: Option<DeviceTree>,
     pub boot_info: &'static BootInfo,
     pub time_origin: Instant,
     pub arch: arch::state::Global,

@@ -71,38 +71,27 @@ pub fn spawn(
             cmd
         }
         Architecture::X86_64 => {
-            let mut cmd = Command::new("qemu-system-x86_64");
+            let mut cmd = Command::new("/storage/qemu/build/qemu-system-x86_64");
             // println!("{}", image.to_str().unwrap());
             cmd.args([
-                "-machine",
-                "q35",
+                "--enable-kvm",
                 "-cpu",
-                "qemu64",
-                "-m",
-                "256M",
-                "-d",
-                "guest_errors",
-                "-display",
-                "none",
+                "host",
                 "-serial",
                 "mon:stdio",
                 "-no-shutdown",
                 "-no-reboot",
-                "-smp",
-                "cpus=1",
-                // "cpus=8",
-                // "-object",
-                // "memory-backend-ram,size=128M,id=m0",
-                // "-object",
-                // "memory-backend-ram,size=128M,id=m1",
-                // "-numa",
-                // "node,cpus=0-3,nodeid=0,memdev=m0",
-                // "-numa",
-                // "node,cpus=4-7,nodeid=1,memdev=m1",
-                // "-numa",
-                // "dist,src=0,dst=1,val=20",
-                "-monitor",
-                "unix:qemu-monitor-socket,server,nowait",
+                "-M", "q35,cxl=on", "-m", "4G", "-smp", "4",
+                "-device", "pxb-cxl,bus_nr=12,bus=pcie.0,id=cxl.1",
+                "-device", "cxl-rp,port=0,bus=cxl.1,id=root_port13,chassis=0,slot=0",
+                "-device", "cxl-rp,port=1,bus=cxl.1,id=root_port14,chassis=0,slot=1",
+                "-device", "cxl-type3,bus=root_port13,persistent-memdev=cxl-mem1,lsa=cxl-lsa1,id=cxl-pmem0,sn=0x1",
+                "-device", "cxl-type1,bus=root_port14,size=256M,cache-size=64M",
+                "-device", "virtio-cxl-accel-pci,bus=pcie.0",
+              "-object","memory-backend-file,id=cxl-mem1,share=on,mem-path=/tmp/cxltest1.raw,size=256M",
+              "-object","memory-backend-file,id=cxl-lsa1,share=on,mem-path=/tmp/lsa1.raw,size=256M",
+              "-M", "cxl-fmw.0.targets.0=cxl.1,cxl-fmw.0.size=4G",
+              "-nographic",
                 "-kernel",
                 image.to_str().unwrap(), // target/x86_64-unknown-none/debug/loader
             ]);

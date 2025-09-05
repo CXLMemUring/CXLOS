@@ -146,7 +146,17 @@ pub fn init(boot_alloc: &mut BootstrapAllocator, boot_info: &BootInfo) {
         serial_out(b'R');
     }
 
+    // FIXME: Skip tracing::debug on x86_64 as it may hang
+    #[cfg(not(target_arch = "x86_64"))]
     tracing::debug!("Kernel Heap: {virt:#x?}");
+    
+    // debug: 'Z' leaving allocator::init
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        serial_out(b'Z');
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn print_nibble_hex(n: u8) { let ch = if n < 10 { b'0' + n } else { b'a' + (n - 10) }; serial_out(ch); }
@@ -155,11 +165,5 @@ unsafe fn print_nibble_hex(n: u8) { let ch = if n < 10 { b'0' + n } else { b'a' 
 unsafe fn print_u64_hex(mut v: u64) {
     for shift in (0..64).step_by(4).rev() {
         let nib = ((v >> shift) & 0xF) as u8; print_nibble_hex(nib);
-    }
-}
-    // debug: 'Z' leaving allocator::init
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        serial_out(b'Z');
     }
 }

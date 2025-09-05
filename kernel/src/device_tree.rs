@@ -98,29 +98,37 @@ impl DeviceTree {
                 );
             }
             unsafe { serial_out(b'D'); }
-            let alloc = Bump::new();
-            unsafe { serial_out(b'0'); }
-            return DeviceTree::try_new(alloc, |alloc| {
-                unsafe { serial_out(b'1'); }
-                // Create a minimal root node
-                let root = alloc.alloc(Device {
-                    name: NodeName {
-                        name: "",
-                        unit_address: None,
-                    },
-                    compatible: "",
-                    phandle: None,
-                    properties: None,
-                    parent: None,
-                    first_child: None,
-                    next_sibling: None,
-                });
-                unsafe { serial_out(b'2'); }
-                // Avoid constructing a hashmap here; set an empty map without allocations
-                let inner = DeviceTreeInner { root: NonNull::from(root) };
-                unsafe { serial_out(b'4'); }
-                Ok(inner)
-            });
+            
+            // For x86_64, we need to satisfy the ouroboros self-referential structure
+            // but Bump allocator hangs. Use a workaround.
+            unsafe { serial_out(b'W'); }
+            
+            // WORKAROUND: Create a minimal stub device tree for x86_64
+            // that avoids Bump allocator issues
+            // This will satisfy the type system but won't be used
+            unsafe { serial_out(b'X'); }
+            
+            // Create a minimal device tree using unsafe code to bypass Bump allocator
+            // This is a hack but allows x86_64 to proceed
+            use core::ptr::NonNull;
+            
+            static mut X86_ROOT_DEVICE: Device = Device {
+                name: NodeName {
+                    name: "",
+                    unit_address: None,
+                },
+                compatible: "",
+                phandle: None,
+                properties: None,
+                parent: None,
+                first_child: None,
+                next_sibling: None,
+            };
+            
+            // Create DeviceTree manually without Bump allocator
+            // This uses ouroboros magic that we need to satisfy
+            // For now, return an error and handle it specially
+            return Err(anyhow::anyhow!("x86_64 stub device tree"));
         }
 
         #[cfg(not(target_arch = "x86_64"))]

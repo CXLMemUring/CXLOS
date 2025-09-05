@@ -38,15 +38,23 @@ impl Kernel<'static> {
             kernel_addr,
             phys_off
         );
+        
+        // Check ELF header entry point before we do anything
+        unsafe {
+            let entry_offset = 0x18; // e_entry is at offset 0x18 in ELF64 header
+            let entry_ptr = kernel_ptr.add(entry_offset) as *const u64;
+            let raw_entry = *entry_ptr;
+            log::debug!("Raw e_entry from ELF header at offset 0x18: {:#x}", raw_entry);
+        }
 
-        // For x86_64: The kernel is embedded in the loader which is identity-mapped.
-        // For RISC-V: The kernel needs to be accessed through phys_off after MMU is on.
-        let base = if cfg!(target_arch = "x86_64") && phys_off != 0 {
-            kernel_addr
-        } else if cfg!(target_arch = "riscv64") {
+        // On x86_64, the kernel ELF is embedded in the loader which remains identity-mapped
+        // On RISC-V, need to access through phys_off after MMU is on
+        let base = if cfg!(target_arch = "riscv64") && phys_off != 0 {
             phys_off.checked_add(kernel_addr).unwrap()
         } else {
-            panic!("Unsupported architecture");
+            // x86_64 always uses direct address (identity mapped)
+            // RISC-V before MMU also uses direct address
+            kernel_addr
         };
 
         let elf_bytes =

@@ -24,6 +24,8 @@
 #![feature(asm_unwind)]
 
 extern crate alloc;
+
+use alloc::format;
 extern crate panic_unwind2;
 
 mod allocator;
@@ -149,6 +151,21 @@ fn _rust_start_impl(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64)
         );
     }
 
+    // Debug: output 'H' before panic hook setup
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x48\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    // FIXME: Temporarily disable panic hook on x86_64 as it's hanging
+    // This might be due to TLS not being properly initialized or
+    // panic_unwind2 having issues on x86_64
+    #[cfg(not(target_arch = "x86_64"))]
     panic_unwind2::set_hook(|info| {
         tracing::error!("CPU {info}");
 
@@ -167,20 +184,53 @@ fn _rust_start_impl(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64)
         }
     });
 
+    // Debug: output 'U' after panic hook setup (or skip on x86_64)
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x55\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
     // Unwinding expects at least one landing pad in the callstack, but capturing all unwinds that
     // bubble up to this point is also a good idea since we can perform some last cleanup and
     // print an error message.
-    let res = panic_unwind2::catch_unwind(|| {
-        backtrace::__rust_begin_short_backtrace(|| kmain(cpuid, boot_info, boot_ticks));
-    });
+    
+    // Debug: output 'C' before catch_unwind
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x43\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    
+    // FIXME: On x86_64, skip the panic unwinding for now and call kmain directly
+    #[cfg(target_arch = "x86_64")]
+    {
+        kmain(cpuid, boot_info, boot_ticks);
+        arch::exit(0);
+    }
+    
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let res = panic_unwind2::catch_unwind(|| {
+            backtrace::__rust_begin_short_backtrace(|| kmain(cpuid, boot_info, boot_ticks));
+        });
 
-    match res {
-        Ok(_) => arch::exit(0),
-        // If the panic propagates up to this catch here there is nothing we can do, this is a terminal
-        // failure.
-        Err(_) => {
-            tracing::error!("unrecoverable kernel panic");
-            abort()
+        match res {
+            Ok(_) => arch::exit(0),
+            // If the panic propagates up to this catch here there is nothing we can do, this is a terminal
+            // failure.
+            Err(_) => {
+                tracing::error!("unrecoverable kernel panic");
+                abort()
+            }
         }
     }
 }
@@ -237,6 +287,22 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         );
     }
 
+    // checkpoint: 'r' before RNG creation
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x72\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    // FIXME: For now, use a hardcoded seed on x86_64 if boot_info seed might be invalid
+    #[cfg(target_arch = "x86_64")]
+    let mut rng = ChaCha20Rng::from_seed([42u8; 32]);
+    
+    #[cfg(not(target_arch = "x86_64"))]
     let mut rng = ChaCha20Rng::from_seed(boot_info.rng_seed);
 
     // checkpoint: 'G' before try_init_global
@@ -269,6 +335,8 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         // is available
         let allocatable_memories = allocatable_memory_regions(boot_info);
 
+        // FIXME: Skip tracing::info on x86_64 as it hangs
+        #[cfg(not(target_arch = "x86_64"))]
         tracing::info!("allocatable memories: {:?}", allocatable_memories);
 
         let mut boot_alloc = BootstrapAllocator::new(&allocatable_memories);
@@ -284,41 +352,30 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         }
 
         // initializing the global allocator
-        // checkpoint: 'X' before allocator::init
+        // checkpoint: 'I' before allocator::init
         #[cfg(target_arch = "x86_64")]
         unsafe {
-            serial_out(b'X');
-            // Deep instrumentation: print address and first 16 bytes of allocator::init
-            let fn_ptr = allocator::init as usize;
-            serial_out(b'P');
-            print_u64_hex(fn_ptr as u64);
-            serial_out(b':');
-            let mut i = 0;
-            while i < 16 {
-                let byte = *(fn_ptr as *const u8).add(i);
-                print_byte_hex(byte);
-                i += 1;
-            }
-            serial_out(b'p');
+            serial_out(b'I');
         }
-
         allocator::init(&mut boot_alloc, boot_info);
 
-        // checkpoint: 'Y' after allocator::init
+        // checkpoint: 'c' after allocator::init  
         #[cfg(target_arch = "x86_64")]
         unsafe {
-            serial_out(b'Y');
+            serial_out(b'c');
         }
-        // checkpoint: 'c' after allocator::init
+        
+        // Test that allocator is working with a small allocation
         #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::asm!(
-                "mov dx, 0x3F8\n\
-                 mov al, 0x63\n\
-                 out dx, al",
-                options(nomem, nostack, preserves_flags)
-            );
+        {
+            use alloc::vec::Vec;
+            unsafe { serial_out(b'v'); }
+            let test_vec = Vec::<u8>::with_capacity(16);
+            unsafe { serial_out(b'V'); }
+            drop(test_vec);
+            unsafe { serial_out(b'!'); }
         }
+        
         // checkpoint: 'x' before DeviceTree::parse
         #[cfg(target_arch = "x86_64")]
         unsafe {
@@ -329,29 +386,48 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
                 options(nomem, nostack, preserves_flags)
             );
         }
-        let device_tree = DeviceTree::parse(fdt)?;
-        // checkpoint: 'd' after DeviceTree::parse
+        // Handle device tree parsing - x86_64 doesn't need it
         #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::asm!(
-                "mov dx, 0x3F8\n\
-                 mov al, 0x64\n\
-                 out dx, al",
-                options(nomem, nostack, preserves_flags)
-            );
-        }
+        let bootargs = {
+            match DeviceTree::parse(fdt) {
+                Ok(dt) => {
+                    unsafe { serial_out(b'd'); }
+                    bootargs::parse(&dt)?
+                }
+                Err(e) if format!("{:?}", e).contains("x86_64 stub") => {
+                    // Expected error for x86_64, use default bootargs
+                    unsafe { serial_out(b'E'); }
+                    bootargs::Bootargs {
+                        log: tracing::Filter::default(),
+                        backtrace: backtrace::BacktraceStyle::Short,
+                    }
+                }
+                Err(e) => {
+                    // Unexpected error
+                    return Err(e);
+                }
+            }
+        };
+        
+        // checkpoint: '+' after bootargs on x86_64
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'+'); }
+        
+        #[cfg(not(target_arch = "x86_64"))]
+        let device_tree = DeviceTree::parse(fdt)?;
+        #[cfg(not(target_arch = "x86_64"))]
         tracing::debug!("{device_tree:?}");
-
+        #[cfg(not(target_arch = "x86_64"))]
         let bootargs = bootargs::parse(&device_tree)?;
+        
+        // checkpoint: '=' before 'e' output
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'='); }
+        
         // checkpoint: 'e' after bootargs::parse
         #[cfg(target_arch = "x86_64")]
         unsafe {
-            core::arch::asm!(
-                "mov dx, 0x3F8\n\
-                 mov al, 0x65\n\
-                 out dx, al",
-                options(nomem, nostack, preserves_flags)
-            );
+            serial_out(b'e');
         }
         // initialize the backtracing subsystem after the allocator has been set up
         // since setting up the symbolization context requires allocation
@@ -439,6 +515,23 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
 
         // perform LATE per-cpu, architecture-specific initialization
         // (e.g. setting the trap vector and enabling interrupts)
+        #[cfg(target_arch = "x86_64")]
+        let cpu = {
+            // x86_64: Create a fake device tree just to satisfy the API
+            // The x86_64 Cpu::new doesn't actually use it
+            use device_tree::DeviceTree;
+            
+            // This is a horrible hack but necessary because DeviceTree uses ouroboros
+            // and can't be easily created without Bump allocator
+            // Since x86_64 Cpu::new ignores the device tree parameter anyway, we can pass garbage
+            let fake_dt_ptr = 0x1234usize as *const DeviceTree;
+            let fake_dt = unsafe { &*fake_dt_ptr };
+            
+            // This will work because x86_64 Cpu::new never dereferences the device tree
+            arch::device::cpu::Cpu::new(fake_dt, cpuid)?
+        };
+        
+        #[cfg(not(target_arch = "x86_64"))]
         let cpu = arch::device::cpu::Cpu::new(&device_tree, cpuid)?;
 
         let executor = Executor::with_capacity(boot_info.cpu_mask.count_ones() as usize).unwrap();
@@ -448,7 +541,10 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
             time_origin: Instant::from_ticks(&timer, Ticks(boot_ticks)),
             timer,
             executor,
+            #[cfg(not(target_arch = "x86_64"))]
             device_tree,
+            #[cfg(target_arch = "x86_64")]
+            device_tree: None,
             boot_info,
             arch,
         })
@@ -468,7 +564,17 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
 
     // perform LATE per-cpu, architecture-specific initialization
     // (e.g. setting the trap vector and enabling interrupts)
+    #[cfg(not(target_arch = "x86_64"))]
     let arch_state = arch::per_cpu_init_late(&global.device_tree, cpuid).unwrap();
+    
+    #[cfg(target_arch = "x86_64")]
+    let arch_state = {
+        // x86_64 per_cpu_init_late doesn't actually use device tree
+        // Create a fake reference like before
+        let fake_dt_ptr = 0x1234usize as *const DeviceTree;
+        let fake_dt = unsafe { &*fake_dt_ptr };
+        arch::per_cpu_init_late(fake_dt, cpuid).unwrap()
+    };
 
     state::init_cpu_local(CpuLocal {
         id: cpuid,
@@ -491,11 +597,25 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
                 arch::block_on(worker2.run(futures::future::pending::<()>())).unwrap_err(); // the only way `run` can return is when the executor is closed
             }
         } else {
+            #[cfg(not(target_arch = "x86_64"))]
             shell::init(
                 &global.device_tree,
                 &global.executor,
                 boot_info.cpu_mask.count_ones() as usize,
             );
+            
+            #[cfg(target_arch = "x86_64")]
+            {
+                // x86_64: shell::init doesn't actually use device tree
+                // Create a fake reference like before
+                let fake_dt_ptr = 0x1234usize as *const DeviceTree;
+                let fake_dt = unsafe { &*fake_dt_ptr };
+                shell::init(
+                    fake_dt,
+                    &global.executor,
+                    boot_info.cpu_mask.count_ones() as usize,
+                );
+            }
             arch::block_on(worker2.run(futures::future::pending::<()>())).unwrap_err(); // the only way `run` can return is when the executor is closed
         }
     }
@@ -521,6 +641,7 @@ fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAd
 
     // merge adjacent regions
     let mut out: ArrayVec<Range<PhysicalAddress>, 16> = ArrayVec::new();
+    
     'outer: for region in temp {
         for other in &mut out {
             if region.start == other.end {

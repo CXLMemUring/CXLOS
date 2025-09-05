@@ -44,7 +44,31 @@ cpu_local! {
 }
 
 pub fn per_cpu_init_early(cpuid: usize) {
+    // Debug checkpoint: entering per_cpu_init_early
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x50\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    
+    // FIXME: Skip TLS access on x86_64 for now as TLS might not be set up yet
+    #[cfg(not(target_arch = "x86_64"))]
     CPUID.get_or_init(|| cpuid);
+    
+    // Debug checkpoint: leaving per_cpu_init_early
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x71\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
 }
 
 /// Perform early initialization of the tracing subsystem. This will enable printing of `log` and `span`
@@ -125,10 +149,28 @@ pub fn init_early() {
 
 /// Fully initialize the subsystem, after this point tracing [`Span`]s will be processed as well.
 pub fn init(filter: Filter) {
+    // Debug: entering tracing::init
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'T'); }
+    
     let subscriber = unsafe { &*SUBSCRIBER_STORAGE.0.as_ptr() };
+    
+    // Debug: got subscriber
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'S'); }
+    
     // Set global tracing dispatch now that early init completed
     let dispatch = Dispatch::from_static(subscriber);
+    
+    // Debug: created dispatch
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'D'); }
+    
     dispatch::set_global_default(dispatch).unwrap();
+    
+    // Debug: set global dispatch
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'G'); }
 
     ::log::set_max_level(match filter.max_level() {
         LevelFilter::OFF => ::log::LevelFilter::Off,

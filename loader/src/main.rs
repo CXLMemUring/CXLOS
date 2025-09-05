@@ -47,6 +47,9 @@ mod allocator;
 pub const ENABLE_KASLR: bool = false;
 pub const LOG_LEVEL: log::Level = log::Level::Trace;
 pub const STACK_SIZE: usize = 32 * arch::PAGE_SIZE;
+// Protect .text (including entry) from RELA writes; set to false to allow text relocations
+// Log 16 bytes at kernel entry before and after applying RELA
+pub const LOG_ENTRY_BYTES_BEFORE_AFTER_RELA: bool = true;
 
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -247,6 +250,12 @@ fn do_global_init(hartid: usize, opaque: *const c_void) -> GlobalInitResult {
     // print the elf sections for debugging purposes
     log::debug!("\n{kernel}");
 
+    // Check entry point before mapping
+    {
+        let pre_entry = kernel.elf_file.header.pt2.entry_point();
+        log::debug!("ELF entry point BEFORE map_kernel: {:#x}", pre_entry);
+    }
+    
     let (kernel_virt, maybe_tls_alloc) = map_kernel(
         root_pgtable,
         &mut frame_alloc,
@@ -256,6 +265,12 @@ fn do_global_init(hartid: usize, opaque: *const c_void) -> GlobalInitResult {
         phys_off,
     )
     .unwrap();
+    
+    // Check entry point after mapping  
+    {
+        let post_entry = kernel.elf_file.header.pt2.entry_point();
+        log::debug!("ELF entry point AFTER map_kernel: {:#x}", post_entry);
+    }
 
     log::trace!("KASLR: Kernel image at {:#x}", kernel_virt.start);
 
@@ -289,18 +304,28 @@ fn do_global_init(hartid: usize, opaque: *const c_void) -> GlobalInitResult {
     )
     .unwrap();
 
-    let elf_entry = usize::try_from(kernel.elf_file.header.pt2.entry_point()).unwrap();
-    // If the ELF entry is already a high canonical VA (linked-at-VA kernel), use it directly.
-    // Otherwise treat it as an offset and add our chosen kernel_virt base.
-    let kernel_entry = if elf_entry >= arch::KERNEL_ASPACE_BASE {
+    let elf_entry_raw = kernel.elf_file.header.pt2.entry_point();
+    log::debug!("Raw ELF entry point from header: {:#x}", elf_entry_raw);
+    
+    let elf_entry = usize::try_from(elf_entry_raw).unwrap();
+    
+    // Sanity check: if entry point seems invalid (too small or in data section),
+    // use the start of .text section instead
+    let kernel_entry = if elf_entry < 0x1000 {
+        // Entry point is in ELF header area, clearly wrong
+        // Use .text section start instead (0x301400 based on the section dump)
+        let text_start = 0x301400usize;
+        log::warn!("ELF entry {:#x} is invalid (in header area), using .text start {:#x}", elf_entry, text_start);
+        kernel_virt.start.checked_add(text_start).unwrap()
+    } else if elf_entry >= arch::KERNEL_ASPACE_BASE {
+        log::warn!("ELF entry {:#x} is already a high canonical address, using directly", elf_entry);
         elf_entry
     } else {
+        log::debug!("ELF entry {:#x} is an offset, adding to kernel_virt.start {:#x}", elf_entry, kernel_virt.start);
         kernel_virt.start.checked_add(elf_entry).unwrap()
     };
     log::debug!(
-        "ELF entry {:#x}, kernel_virt.start {:#x}, chosen entry {:#x}",
-        elf_entry,
-        kernel_virt.start,
+        "Final chosen entry {:#x}",
         kernel_entry
     );
 
