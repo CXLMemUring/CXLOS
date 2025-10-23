@@ -97,21 +97,27 @@ impl DeviceTree {
                     options(nostack, preserves_flags)
                 );
             }
-            unsafe { serial_out(b'D'); }
-            
+            unsafe {
+                serial_out(b'D');
+            }
+
             // For x86_64, we need to satisfy the ouroboros self-referential structure
             // but Bump allocator hangs. Use a workaround.
-            unsafe { serial_out(b'W'); }
-            
+            unsafe {
+                serial_out(b'W');
+            }
+
             // WORKAROUND: Create a minimal stub device tree for x86_64
             // that avoids Bump allocator issues
             // This will satisfy the type system but won't be used
-            unsafe { serial_out(b'X'); }
-            
+            unsafe {
+                serial_out(b'X');
+            }
+
             // Create a minimal device tree using unsafe code to bypass Bump allocator
             // This is a hack but allows x86_64 to proceed
             use core::ptr::NonNull;
-            
+
             static mut X86_ROOT_DEVICE: Device = Device {
                 name: NodeName {
                     name: "",
@@ -124,7 +130,7 @@ impl DeviceTree {
                 first_child: None,
                 next_sibling: None,
             };
-            
+
             // Create DeviceTree manually without Bump allocator
             // This uses ouroboros magic that we need to satisfy
             // For now, return an error and handle it specially
@@ -210,7 +216,8 @@ impl DeviceTree {
         #[cfg(not(target_arch = "x86_64"))]
         {
             // Safety: we only inserted valid pointers into the map, so we should only get valid pointers out...
-            return self.with_inner(|inner| unsafe { Some(inner.phandle2ptr.get(&phandle)?.as_ref()) });
+            return self
+                .with_inner(|inner| unsafe { Some(inner.phandle2ptr.get(&phandle)?.as_ref()) });
         }
         #[cfg(target_arch = "x86_64")]
         {

@@ -29,7 +29,7 @@ impl BusyboxCommandImpl for EchoCommand {
     fn execute(&self, ctx: &mut CommandContext) -> Result<String, String> {
         let mut output = String::new();
         let mut first = true;
-        
+
         for arg in &ctx.args[1..] {
             if !first {
                 output.push(' ');
@@ -38,7 +38,7 @@ impl BusyboxCommandImpl for EchoCommand {
             first = false;
         }
         output.push('\n');
-        
+
         Ok(output)
     }
 }
@@ -54,17 +54,17 @@ pub struct UnameCommand;
 impl BusyboxCommandImpl for UnameCommand {
     fn execute(&self, ctx: &mut CommandContext) -> Result<String, String> {
         let mut output = String::new();
-        
+
         if ctx.args.len() == 1 || ctx.args.contains(&"-s".to_string()) {
             output.push_str("k23");
         }
-        
+
         if ctx.args.contains(&"-a".to_string()) {
             output.push_str("k23 ");
             output.push_str("kernel ");
             output.push_str(env!("CARGO_PKG_VERSION"));
             output.push(' ');
-            
+
             #[cfg(target_arch = "riscv64")]
             output.push_str("riscv64");
             #[cfg(target_arch = "x86_64")]
@@ -72,23 +72,21 @@ impl BusyboxCommandImpl for UnameCommand {
             #[cfg(target_arch = "aarch64")]
             output.push_str("aarch64");
         }
-        
+
         if ctx.args.contains(&"-n".to_string()) {
             output.push_str(" k23-node");
         }
-        
+
         if ctx.args.contains(&"-r".to_string()) {
             output.push(' ');
             output.push_str(env!("CARGO_PKG_VERSION"));
         }
-        
+
         if ctx.args.contains(&"-v".to_string()) {
             output.push(' ');
-            output.push_str(concat!(
-                "#", env!("CARGO_PKG_VERSION"), "-k23"
-            ));
+            output.push_str(concat!("#", env!("CARGO_PKG_VERSION"), "-k23"));
         }
-        
+
         if ctx.args.contains(&"-m".to_string()) {
             output.push(' ');
             #[cfg(target_arch = "riscv64")]
@@ -98,7 +96,7 @@ impl BusyboxCommandImpl for UnameCommand {
             #[cfg(target_arch = "aarch64")]
             output.push_str("aarch64");
         }
-        
+
         output.push('\n');
         Ok(output)
     }
@@ -149,12 +147,13 @@ impl BusyboxCommandImpl for SleepCommand {
         if ctx.args.len() < 2 {
             return Err("sleep: missing operand".to_string());
         }
-        
-        let seconds = ctx.args[1].parse::<u64>()
+
+        let seconds = ctx.args[1]
+            .parse::<u64>()
             .map_err(|_| "sleep: invalid time interval".to_string())?;
-        
+
         tracing::info!("Sleeping for {} seconds...", seconds);
-        
+
         Ok(String::new())
     }
 }
@@ -163,24 +162,27 @@ pub struct SeqCommand;
 impl BusyboxCommandImpl for SeqCommand {
     fn execute(&self, ctx: &mut CommandContext) -> Result<String, String> {
         let mut output = String::new();
-        
+
         let (start, end) = match ctx.args.len() {
             1 => return Err("seq: missing operand".to_string()),
             2 => {
-                let end = ctx.args[1].parse::<i32>()
+                let end = ctx.args[1]
+                    .parse::<i32>()
                     .map_err(|_| "seq: invalid number".to_string())?;
                 (1, end)
-            },
+            }
             3 => {
-                let start = ctx.args[1].parse::<i32>()
+                let start = ctx.args[1]
+                    .parse::<i32>()
                     .map_err(|_| "seq: invalid start number".to_string())?;
-                let end = ctx.args[2].parse::<i32>()
+                let end = ctx.args[2]
+                    .parse::<i32>()
                     .map_err(|_| "seq: invalid end number".to_string())?;
                 (start, end)
-            },
+            }
             _ => return Err("seq: too many arguments".to_string()),
         };
-        
+
         if start <= end {
             for i in start..=end {
                 writeln!(output, "{}", i).unwrap();
@@ -190,7 +192,7 @@ impl BusyboxCommandImpl for SeqCommand {
                 writeln!(output, "{}", i).unwrap();
             }
         }
-        
+
         Ok(output)
     }
 }
@@ -203,13 +205,13 @@ impl BusyboxCommandImpl for YesCommand {
         } else {
             "y".to_string()
         };
-        
+
         let mut output = String::new();
         for _ in 0..10 {
             writeln!(output, "{}", text).unwrap();
         }
         output.push_str("... (continues indefinitely)\n");
-        
+
         Ok(output)
     }
 }
@@ -220,10 +222,10 @@ impl BusyboxCommandImpl for BasenameCommand {
         if ctx.args.len() < 2 {
             return Err("basename: missing operand".to_string());
         }
-        
+
         let path = &ctx.args[1];
         let basename = path.split('/').last().unwrap_or(path);
-        
+
         let result = if ctx.args.len() > 2 {
             let suffix = &ctx.args[2];
             if basename.ends_with(suffix) {
@@ -234,7 +236,7 @@ impl BusyboxCommandImpl for BasenameCommand {
         } else {
             basename
         };
-        
+
         Ok(format!("{}\n", result))
     }
 }
@@ -245,7 +247,7 @@ impl BusyboxCommandImpl for DirnameCommand {
         if ctx.args.len() < 2 {
             return Err("dirname: missing operand".to_string());
         }
-        
+
         let path = &ctx.args[1];
         if let Some(pos) = path.rfind('/') {
             if pos == 0 {
@@ -265,7 +267,7 @@ impl BusyboxCommandImpl for TestCommand {
         if ctx.args.len() < 2 {
             return Err("test: missing operand".to_string());
         }
-        
+
         match ctx.args[1].as_str() {
             "-z" => {
                 if ctx.args.len() < 3 {
@@ -275,7 +277,7 @@ impl BusyboxCommandImpl for TestCommand {
                 } else {
                     Err("test failed".to_string())
                 }
-            },
+            }
             "-n" => {
                 if ctx.args.len() < 3 {
                     Err("test failed".to_string())
@@ -284,7 +286,7 @@ impl BusyboxCommandImpl for TestCommand {
                 } else {
                     Err("test failed".to_string())
                 }
-            },
+            }
             _ => {
                 if &ctx.args[1] == ctx.args.get(3).unwrap_or(&String::new()) {
                     Ok(String::new())
@@ -302,7 +304,7 @@ impl BusyboxCommandImpl for WcCommand {
         if ctx.args.len() < 2 {
             return Err("wc: missing file operand".to_string());
         }
-        
+
         Ok("0 0 0\n".to_string())
     }
 }
@@ -323,38 +325,37 @@ impl BusyboxCommandImpl for LsCommand {
             &ctx.current_dir
         };
 
-        crate::fs::with_vfs(|vfs| {
-            match vfs.list_dir(path) {
-                Ok(entries) => {
-                    let mut output = String::new();
-                    for entry in entries {
-                        let full_path = if path == "/" {
-                            format!("/{}", entry)
-                        } else {
-                            format!("{}/{}", path, entry)
-                        };
-                        
-                        if let Ok(stat) = vfs.stat(&full_path) {
-                            match stat.file_type {
-                                crate::fs::FileType::Directory => {
-                                    output.push_str(&format!("{}/ ", entry));
-                                },
-                                _ => {
-                                    output.push_str(&format!("{} ", entry));
-                                }
+        crate::fs::with_vfs(|vfs| match vfs.list_dir(path) {
+            Ok(entries) => {
+                let mut output = String::new();
+                for entry in entries {
+                    let full_path = if path == "/" {
+                        format!("/{}", entry)
+                    } else {
+                        format!("{}/{}", path, entry)
+                    };
+
+                    if let Ok(stat) = vfs.stat(&full_path) {
+                        match stat.file_type {
+                            crate::fs::FileType::Directory => {
+                                output.push_str(&format!("{}/ ", entry));
                             }
-                        } else {
-                            output.push_str(&format!("{} ", entry));
+                            _ => {
+                                output.push_str(&format!("{} ", entry));
+                            }
                         }
+                    } else {
+                        output.push_str(&format!("{} ", entry));
                     }
-                    if !output.is_empty() {
-                        output.push('\n');
-                    }
-                    Ok(output)
                 }
-                Err(e) => Err(format!("ls: {}: {}", path, e))
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                Ok(output)
             }
-        }).unwrap_or_else(|| Err("ls: filesystem not initialized".to_string()))
+            Err(e) => Err(format!("ls: {}: {}", path, e)),
+        })
+        .unwrap_or_else(|| Err("ls: filesystem not initialized".to_string()))
     }
 }
 
@@ -375,7 +376,11 @@ impl BusyboxCommandImpl for MkdirCommand {
             }
         }
 
-        if errs.is_empty() { Ok(String::new()) } else { Err(errs.join("\n")) }
+        if errs.is_empty() {
+            Ok(String::new())
+        } else {
+            Err(errs.join("\n"))
+        }
     }
 }
 
@@ -389,17 +394,22 @@ impl BusyboxCommandImpl for TouchCommand {
         let mut errs = Vec::new();
         for path in &ctx.args[1..] {
             // If file exists, succeed; otherwise create empty file
-            let exists = crate::fs::with_vfs(|vfs| vfs.exists(path))
-                .unwrap_or(false);
+            let exists = crate::fs::with_vfs(|vfs| vfs.exists(path)).unwrap_or(false);
             if !exists {
                 let res = crate::fs::with_vfs_mut(|vfs| vfs.create_file(path, &[]))
                     .ok_or_else(|| "filesystem not initialized".to_string())
                     .and_then(|r| r.map_err(|e| e.to_string()));
-                if let Err(e) = res { errs.push(format!("touch: {}: {}", path, e)); }
+                if let Err(e) = res {
+                    errs.push(format!("touch: {}: {}", path, e));
+                }
             }
         }
 
-        if errs.is_empty() { Ok(String::new()) } else { Err(errs.join("\n")) }
+        if errs.is_empty() {
+            Ok(String::new())
+        } else {
+            Err(errs.join("\n"))
+        }
     }
 }
 
@@ -411,17 +421,14 @@ impl BusyboxCommandImpl for CatCommand {
         }
 
         let path = &ctx.args[1];
-        crate::fs::with_vfs(|vfs| {
-            match vfs.read_file(path) {
-                Ok(content) => {
-                    match String::from_utf8(content) {
-                        Ok(s) => Ok(s),
-                        Err(_) => Ok("[binary data]\n".to_string())
-                    }
-                }
-                Err(e) => Err(format!("cat: {}: {}", path, e))
-            }
-        }).unwrap_or_else(|| Err("cat: filesystem not initialized".to_string()))
+        crate::fs::with_vfs(|vfs| match vfs.read_file(path) {
+            Ok(content) => match String::from_utf8(content) {
+                Ok(s) => Ok(s),
+                Err(_) => Ok("[binary data]\n".to_string()),
+            },
+            Err(e) => Err(format!("cat: {}: {}", path, e)),
+        })
+        .unwrap_or_else(|| Err("cat: filesystem not initialized".to_string()))
     }
 }
 
@@ -432,7 +439,10 @@ impl BusyboxCommandImpl for LessCommand {
             return Ok("(END) -- Press q to quit\n".to_string());
         }
         // Stub implementation
-        Ok(format!("less: {}: No such file or directory\n", ctx.args[1]))
+        Ok(format!(
+            "less: {}: No such file or directory\n",
+            ctx.args[1]
+        ))
     }
 }
 
@@ -443,7 +453,10 @@ impl BusyboxCommandImpl for MoreCommand {
             return Ok("--More--(END)\n".to_string());
         }
         // Stub implementation
-        Ok(format!("more: {}: No such file or directory\n", ctx.args[1]))
+        Ok(format!(
+            "more: {}: No such file or directory\n",
+            ctx.args[1]
+        ))
     }
 }
 
@@ -471,8 +484,11 @@ impl BusyboxCommandImpl for TopCommand {
         let mut output = String::new();
         output.push_str("top - 00:00:00 up 0 min,  1 user,  load average: 0.00, 0.00, 0.00\n");
         output.push_str("Tasks:   2 total,   1 running,   1 sleeping,   0 stopped,   0 zombie\n");
-        output.push_str("Cpu(s):  0.0%us,  0.0%sy,  0.0%ni,100.0%id,  0.0%wa,  0.0%hi,  0.0%si,  0.0%st\n");
-        output.push_str("Mem:    32768k total,     4096k used,    28672k free,        0k buffers\n");
+        output.push_str(
+            "Cpu(s):  0.0%us,  0.0%sy,  0.0%ni,100.0%id,  0.0%wa,  0.0%hi,  0.0%si,  0.0%st\n",
+        );
+        output
+            .push_str("Mem:    32768k total,     4096k used,    28672k free,        0k buffers\n");
         output.push_str("\n");
         output.push_str("  PID USER      PR  NI  VIRT  RES  SHR S %CPU %MEM     TIME+ COMMAND\n");
         output.push_str("    1 root      20   0  1024  256  128 S  0.0  0.8   0:00.00 init\n");
@@ -484,8 +500,12 @@ pub struct FreeCommand;
 impl BusyboxCommandImpl for FreeCommand {
     fn execute(&self, _ctx: &mut CommandContext) -> Result<String, String> {
         let mut output = String::new();
-        output.push_str("              total       used       free     shared    buffers     cached\n");
-        output.push_str("Mem:         32768       4096      28672          0          0          0\n");
+        output.push_str(
+            "              total       used       free     shared    buffers     cached\n",
+        );
+        output.push_str(
+            "Mem:         32768       4096      28672          0          0          0\n",
+        );
         output.push_str("-/+ buffers/cache:       4096      28672\n");
         output.push_str("Swap:            0          0          0\n");
         Ok(output)
@@ -530,7 +550,7 @@ impl BusyboxCommandImpl for WhichCommand {
         if ctx.args.len() < 2 {
             return Err("which: missing command name".to_string());
         }
-        
+
         // Check if it's a known busybox command
         if super::get_command(&ctx.args[1]).is_some() {
             Ok(format!("/bin/{}\n", ctx.args[1]))

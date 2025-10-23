@@ -9,7 +9,7 @@ use core::cell::UnsafeCell;
 use core::fmt::{Arguments, Write};
 use core::{cmp, fmt};
 
-use spin::{ReentrantMutex, ReentrantMutexGuard};
+use spin::{Mutex, MutexGuard};
 use tracing_core::Metadata;
 
 use crate::tracing::color::{AnsiEscapes, Color, SetColor};
@@ -242,8 +242,8 @@ cfg_if::cfg_if! {
     }
 }
 
-pub struct Semihosting(ReentrantMutex<UnsafeCell<DebugStream>>);
-pub struct SemihostingWriter<'a>(ReentrantMutexGuard<'a, UnsafeCell<DebugStream>>);
+pub struct Semihosting(Mutex<UnsafeCell<DebugStream>>);
+pub struct SemihostingWriter<'a>(MutexGuard<'a, UnsafeCell<DebugStream>>);
 
 impl Semihosting {
     pub fn new() -> Self {
@@ -257,7 +257,7 @@ impl Semihosting {
                 options(nomem, nostack, preserves_flags)
             );
         }
-        let s = Self(ReentrantMutex::new(UnsafeCell::new(new_debug_stream())));
+        let s = Self(Mutex::new(UnsafeCell::new(new_debug_stream())));
         // debug: 'm' leaving Semihosting::new
         #[cfg(target_arch = "x86_64")]
         unsafe {

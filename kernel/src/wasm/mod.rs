@@ -14,6 +14,7 @@ mod cranelift;
 mod engine;
 mod func;
 mod global;
+pub mod host_fs;
 mod indices;
 mod instance;
 pub mod linker;
@@ -30,7 +31,6 @@ mod types;
 mod utils;
 mod values;
 mod vm;
-pub mod host_fs;
 /// Internal default instance allocator suitable for bootstrapping.
 static PLACEHOLDER_ALLOC: vm::PlaceholderAllocatorDontUse = vm::PlaceholderAllocatorDontUse;
 
@@ -51,8 +51,7 @@ pub use table::Table;
 pub use tag::Tag;
 pub use trap::TrapKind;
 pub use values::Val;
-pub use vm::ConstExprEvaluator;
-pub use vm::PlaceholderAllocatorDontUse;
+pub use vm::{ConstExprEvaluator, PlaceholderAllocatorDontUse};
 
 use crate::wasm::store::StoreOpaque;
 use crate::wasm::utils::{enum_accessors, owned_enum_accessors};

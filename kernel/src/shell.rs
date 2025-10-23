@@ -26,11 +26,11 @@ use fallible_iterator::FallibleIterator;
 use kasync::executor::Executor;
 use spin::{Barrier, OnceLock};
 
+use crate::busybox::{self, commands};
 use crate::device_tree::DeviceTree;
 use crate::mem::{Mmap, PhysicalAddress, with_kernel_aspace};
 use crate::state::global;
 use crate::{arch, irq};
-use crate::busybox::{self, commands};
 
 static COMMANDS: &[Command] = &[PANIC, FAULT, VERSION, SHUTDOWN];
 
@@ -277,7 +277,9 @@ pub fn eval(line: &str) {
         if busybox::wasm_loader::is_initialized() {
             let cmd = parts[0].as_str();
             let args: alloc::vec::Vec<&str> = parts.iter().skip(1).map(|s| s.as_str()).collect();
-            if let Ok(true) = busybox::wasm_loader::call_busybox(cmd, &args) { return; }
+            if let Ok(true) = busybox::wasm_loader::call_busybox(cmd, &args) {
+                return;
+            }
         }
 
         if let Some(impl_fn) = commands::get_command_impl(&parts[0]) {

@@ -125,7 +125,7 @@ pub fn define_host_fs<T>(linker: &mut Linker<T>) -> crate::Result<()> {
     linker.func_wrap(
         "host",
         "fs_open",
-        |mut caller: Caller<'_, T>, path_ptr:i32, _flags:i32| {
+        |mut caller: Caller<'_, T>, path_ptr: i32, _flags: i32| {
             let Some(mem) = first_memory(&mut caller) else {
                 return -1;
             };
@@ -149,25 +149,21 @@ pub fn define_host_fs<T>(linker: &mut Linker<T>) -> crate::Result<()> {
     )?;
 
     // fs_close(fd) -> i32
-    linker.func_wrap(
-        "host",
-        "fs_close",
-        |_caller: Caller<'_, T>, fd: i32| {
-            if let Some(mut table) = fd_lookup_mut(fd) {
-                if let Some(pos) = table.iter().position(|(f, _)| *f == fd) {
-                    table.remove(pos);
-                    return 0i32;
-                }
+    linker.func_wrap("host", "fs_close", |_caller: Caller<'_, T>, fd: i32| {
+        if let Some(mut table) = fd_lookup_mut(fd) {
+            if let Some(pos) = table.iter().position(|(f, _)| *f == fd) {
+                table.remove(pos);
+                return 0i32;
             }
-            -1i32
-        },
-    )?;
+        }
+        -1i32
+    })?;
 
     // fs_read(fd, buf_ptr, len) -> i32 bytes
     linker.func_wrap(
         "host",
         "fs_read",
-        |mut caller: Caller<'_, T>, fd:i32, buf_ptr:i32, len:i32| {
+        |mut caller: Caller<'_, T>, fd: i32, buf_ptr: i32, len: i32| {
             let Some(mut table) = fd_lookup_mut(fd) else {
                 return -1;
             };
@@ -213,7 +209,7 @@ pub fn define_host_fs<T>(linker: &mut Linker<T>) -> crate::Result<()> {
     linker.func_wrap(
         "host",
         "fs_write",
-        |mut caller: Caller<'_, T>, fd:i32, buf_ptr:i32, len:  i32| {
+        |mut caller: Caller<'_, T>, fd: i32, buf_ptr: i32, len: i32| {
             let Some(mut table) = fd_lookup_mut(fd) else {
                 return -1;
             };
@@ -262,7 +258,7 @@ pub fn define_host_fs<T>(linker: &mut Linker<T>) -> crate::Result<()> {
     linker.func_wrap(
         "host",
         "fs_stat",
-        |mut caller: Caller<'_, T>, path_ptr:i32, out_ptr:i32| {
+        |mut caller: Caller<'_, T>, path_ptr: i32, out_ptr: i32| {
             let Some(mem) = first_memory(&mut caller) else {
                 return -1;
             };

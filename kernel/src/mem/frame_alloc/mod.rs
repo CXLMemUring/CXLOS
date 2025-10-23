@@ -41,7 +41,10 @@ pub fn init(
     fdt_region: Range<PhysicalAddress>,
 ) -> &'static FrameAllocator {
     FRAME_ALLOC_ONCE.call_once(|| unsafe {
-        FRAME_ALLOC_STORAGE.0.as_mut_ptr().write(FrameAllocator::new(boot_alloc, fdt_region));
+        FRAME_ALLOC_STORAGE
+            .0
+            .as_mut_ptr()
+            .write(FrameAllocator::new(boot_alloc, fdt_region));
     });
     unsafe { &*FRAME_ALLOC_STORAGE.0.as_ptr() }
 }

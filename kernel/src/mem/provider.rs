@@ -15,7 +15,7 @@ use spin::{LazyLock, OnceLock};
 
 use crate::arch;
 use crate::mem::frame_alloc::frame_list::FrameList;
-use crate::mem::frame_alloc::{global as FRAME_ALLOC_GLOBAL, Frame, FrameAllocator};
+use crate::mem::frame_alloc::{Frame, FrameAllocator, global as FRAME_ALLOC_GLOBAL};
 
 pub trait Provider: Debug {
     // TODO make async

@@ -15,20 +15,35 @@ mod writer;
 use core::cell::{Cell, OnceCell};
 use core::fmt;
 use core::fmt::Write;
+#[cfg(target_arch = "x86_64")]
+use core::panic::AssertUnwindSafe;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 pub use ::tracing::*;
 use color::{Color, SetColor};
 use cpu_local::cpu_local;
 pub use filter::Filter;
+#[cfg(target_arch = "x86_64")]
+use panic_unwind2::catch_unwind;
 use registry::Registry;
 use spin::OnceLock;
-use core::sync::atomic::{AtomicU8, Ordering};
 use tracing::field;
 use tracing_core::span::{Attributes, Current, Id, Record};
 use tracing_core::{Collect, Dispatch, Event, Interest, Level, LevelFilter, Metadata};
 
 use crate::state::try_global;
 use crate::tracing::writer::{MakeWriter, Semihosting};
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn serial_out(byte: u8) {
+    core::arch::asm!(
+        "out dx, al",
+        in("al") byte,
+        in("dx") 0x3F8u16,
+        options(nostack, preserves_flags)
+    );
+}
 
 // Custom early init storage to avoid potential alignment issues with generic OnceLock<T>
 #[repr(align(64))]
@@ -54,11 +69,11 @@ pub fn per_cpu_init_early(cpuid: usize) {
             options(nomem, nostack, preserves_flags)
         );
     }
-    
+
     // FIXME: Skip TLS access on x86_64 for now as TLS might not be set up yet
     #[cfg(not(target_arch = "x86_64"))]
     CPUID.get_or_init(|| cpuid);
-    
+
     // Debug checkpoint: leaving per_cpu_init_early
     #[cfg(target_arch = "x86_64")]
     unsafe {
@@ -151,26 +166,90 @@ pub fn init_early() {
 pub fn init(filter: Filter) {
     // Debug: entering tracing::init
     #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'T'); }
-    
+    unsafe {
+        serial_out(b'T');
+    }
+
     let subscriber = unsafe { &*SUBSCRIBER_STORAGE.0.as_ptr() };
-    
+
     // Debug: got subscriber
     #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'S'); }
-    
+    unsafe {
+        serial_out(b'S');
+    }
+
     // Set global tracing dispatch now that early init completed
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        serial_out(b'1');
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        serial_out(b'9');
+    }
+
+    // Test FS_BASE register before TLS access
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        serial_out(b'[');
+        // Read FS_BASE MSR (0xC0000100)
+        let mut fs_base_low: u32;
+        let mut fs_base_high: u32;
+        core::arch::asm!(
+            "mov ecx, 0xC0000100",
+            "rdmsr",
+            out("eax") fs_base_low,
+            out("edx") fs_base_high,
+            out("ecx") _,
+        );
+        let fs_base = ((fs_base_high as u64) << 32) | (fs_base_low as u64);
+
+        // Output FS_BASE value
+        serial_out(b'F');
+        serial_out(b'S');
+        serial_out(b'=');
+        crate::allocator::print_u64_hex(fs_base);
+
+        // Now try to directly access a TLS variable
+        serial_out(b'T');
+        serial_out(b'L');
+        serial_out(b'S');
+        serial_out(b':');
+
+        // Try to read OUTPUT_INDENT (should be initialized to 0)
+        let indent_val = OUTPUT_INDENT.get();
+        serial_out(b'@');
+        if let Some(v) = indent_val {
+            serial_out(b'O');
+            crate::allocator::print_u64_hex(*v as u64);
+        } else {
+            serial_out(b'N');
+        }
+
+        serial_out(b']');
+    }
+
     let dispatch = Dispatch::from_static(subscriber);
-    
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        serial_out(b'2');
+    }
+
     // Debug: created dispatch
     #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'D'); }
-    
+    unsafe {
+        serial_out(b'D');
+    }
+
     dispatch::set_global_default(dispatch).unwrap();
-    
+
     // Debug: set global dispatch
     #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'G'); }
+    unsafe {
+        serial_out(b'G');
+    }
 
     ::log::set_max_level(match filter.max_level() {
         LevelFilter::OFF => ::log::LevelFilter::Off,
@@ -194,9 +273,21 @@ struct Subscriber {
 
 impl Collect for Subscriber {
     fn register_callsite(&self, meta: &'static Metadata<'static>) -> Interest {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            serial_out(b'r');
+        }
         if self.enabled(meta) {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                serial_out(b'1');
+            }
             Interest::always()
         } else {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                serial_out(b'0');
+            }
             Interest::never()
         }
     }

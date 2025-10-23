@@ -38,13 +38,16 @@ impl Kernel<'static> {
             kernel_addr,
             phys_off
         );
-        
+
         // Check ELF header entry point before we do anything
         unsafe {
             let entry_offset = 0x18; // e_entry is at offset 0x18 in ELF64 header
             let entry_ptr = kernel_ptr.add(entry_offset) as *const u64;
             let raw_entry = *entry_ptr;
-            log::debug!("Raw e_entry from ELF header at offset 0x18: {:#x}", raw_entry);
+            log::debug!(
+                "Raw e_entry from ELF header at offset 0x18: {:#x}",
+                raw_entry
+            );
         }
 
         // On x86_64, the kernel ELF is embedded in the loader which remains identity-mapped
@@ -104,7 +107,11 @@ impl Kernel<'_> {
             min_addr = core::cmp::min(min_addr, v);
             max_addr = core::cmp::max(max_addr, v.saturating_add(mem));
         }
-        if min_addr == u64::MAX { 0 } else { max_addr.saturating_sub(min_addr) }
+        if min_addr == u64::MAX {
+            0
+        } else {
+            max_addr.saturating_sub(min_addr)
+        }
     }
 
     /// Returns the largest alignment of any loadable segment in the kernel and by extension
@@ -174,7 +181,9 @@ pub fn dbg_entry_file_bytes(entry_va: usize) -> Option<([u8; 16], usize)> {
         if image_rva >= vaddr && image_rva < vaddr.saturating_add(filesz) {
             let off = usize::try_from(ph.offset()).ok()?;
             let file_off = off + (image_rva - vaddr);
-            if file_off >= bytes.len() { return None; }
+            if file_off >= bytes.len() {
+                return None;
+            }
             let mut out = [0u8; 16];
             let avail = core::cmp::min(16, bytes.len().saturating_sub(file_off));
             out[..avail].copy_from_slice(&bytes[file_off..file_off + avail]);

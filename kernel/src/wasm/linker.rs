@@ -13,8 +13,8 @@ use anyhow::{Context, bail, format_err};
 use hashbrown::HashMap;
 use hashbrown::hash_map::Entry;
 
-use crate::wasm::func::{HostFunc, IntoFunc};
 use crate::wasm::func::host::{HostParams, HostResults};
+use crate::wasm::func::{HostFunc, IntoFunc};
 use crate::wasm::indices::VMSharedTypeIndex;
 use crate::wasm::store::StoreOpaque;
 use crate::wasm::translate::EntityType;

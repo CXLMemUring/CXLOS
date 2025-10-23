@@ -1,6 +1,6 @@
 [workspace]
 members = ["kernel", "libs/*", "build/*", "loader", "loader/api", "libs/ktest/macros"]
-resolver = "3"
+resolver = "2"
 
 [workspace.package]
 version = "0.1.0"

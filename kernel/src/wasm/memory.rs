@@ -5,10 +5,11 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
+use core::sync::atomic::Ordering;
+
 use crate::wasm::store::{StoreOpaque, Stored};
 use crate::wasm::types::MemoryType;
 use crate::wasm::vm::{ExportedMemory, VMMemoryImport, VmPtr};
-use core::sync::atomic::Ordering;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Memory(Stored<ExportedMemory>);
@@ -39,7 +40,10 @@ impl Memory {
         let def = export.definition.as_ptr();
         // Safety: caller upholds memory validity for the lifetime of use
         unsafe {
-            ((*def).base.as_ptr(), (*def).current_length(Ordering::Relaxed))
+            (
+                (*def).base.as_ptr(),
+                (*def).current_length(Ordering::Relaxed),
+            )
         }
     }
 

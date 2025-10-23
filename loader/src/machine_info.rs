@@ -88,149 +88,150 @@ impl MachineInfo<'_> {
 
         #[cfg(not(target_arch = "x86_64"))]
         {
-        assert!(!fdt_ptr.is_null());
-        assert_eq!(fdt_ptr.align_offset(core::mem::align_of::<u32>()), 0); // make sure the pointer is aligned correctly
+            assert!(!fdt_ptr.is_null());
+            assert_eq!(fdt_ptr.align_offset(core::mem::align_of::<u32>()), 0); // make sure the pointer is aligned correctly
 
-        // Safety: we made a reasonable effort to ensure the pointer is valid
-        let fdt = unsafe { Fdt::from_ptr(fdt_ptr.cast())? };
-        let mut reservations = fdt.reserved_entries();
-        let fdt_slice = fdt.as_slice();
+            // Safety: we made a reasonable effort to ensure the pointer is valid
+            let fdt = unsafe { Fdt::from_ptr(fdt_ptr.cast())? };
+            let mut reservations = fdt.reserved_entries();
+            let fdt_slice = fdt.as_slice();
 
-        let mut memories: ArrayVec<Range<usize>, 16> = ArrayVec::new();
-        let mut reserved_memory: ArrayVec<Range<usize>, 16> = ArrayVec::new();
-        let mut hart_mask = 0;
-        let mut rng_seed = None;
+            let mut memories: ArrayVec<Range<usize>, 16> = ArrayVec::new();
+            let mut reserved_memory: ArrayVec<Range<usize>, 16> = ArrayVec::new();
+            let mut hart_mask = 0;
+            let mut rng_seed = None;
 
-        let mut stack: [Option<(&str, CellSizes)>; 16] = [const { None }; 16];
-        stack[0] = Some((
-            "",
-            find_size_cells(fdt.properties(), &CellSizes::default())?,
-        ));
-
-        let mut iter = fdt.nodes()?;
-        while let Some((depth, node)) = iter.next()? {
-            let name = node.name()?;
-
-            if name.name == "cpu"
-                && let Some(hartid) = name
-                    .unit_address
-                    .and_then(|addr| usize::from_str(addr).ok())
-            {
-                // if the node is a CPU check its availability and populate the hart_mask
-
-                let available = find_cstr_property(node.properties(), "status")? == Some(c"okay");
-
-                if available {
-                    hart_mask |= 1 << hartid;
-                }
-            } else if name.name == "memory"
-                && find_cstr_property(node.properties(), "device_type")? == Some(c"memory")
-            {
-                // if the node is a memory node, add it to the list of available memory regions
-
-                let mut iter = find_property(node.properties(), "reg")?
-                    .unwrap()
-                    .as_regs(stack[depth - 1].unwrap().1);
-
-                while let Some(reg) = iter.next()? {
-                    memories.push(Range::from(
-                        reg.starting_address..reg.starting_address + reg.size.unwrap_or(0),
-                    ));
-                }
-            } else if stack[depth - 1].is_some_and(|(s, _)| s == "reserved-memory") {
-                // if the node is a reserved-memory node, add it to the list of reserved memory regions
-
-                let mut iter = find_property(node.properties(), "reg")?
-                    .unwrap()
-                    .as_regs(stack[depth - 1].unwrap().1);
-                while let Some(reg) = iter.next()? {
-                    reserved_memory.push(Range::from(
-                        reg.starting_address..reg.starting_address + reg.size.unwrap_or(0),
-                    ));
-                }
-            } else if name.name == "chosen" {
-                // and finally if the node is the chosen node, extract the RNG seed
-
-                rng_seed = find_property(node.properties(), "rng-seed")?.map(|prop| prop.raw);
-            }
-
-            // add the name and size_cells to the stack so we have it available for the next iteration
-            stack[depth] = Some((
-                name.name,
-                find_size_cells(node.properties(), &stack[depth - 1].as_ref().unwrap().1)?,
+            let mut stack: [Option<(&str, CellSizes)>; 16] = [const { None }; 16];
+            stack[0] = Some((
+                "",
+                find_size_cells(fdt.properties(), &CellSizes::default())?,
             ));
-        }
 
-        let mut exclude_region = |entry: Range<usize>| {
-            let _memories = memories.take();
+            let mut iter = fdt.nodes()?;
+            while let Some((depth, node)) = iter.next()? {
+                let name = node.name()?;
 
-            for mut region in _memories {
-                if entry.contains(&region.start) && entry.contains(&region.end) {
-                    // remove region
-                    continue;
-                } else if region.contains(&entry.start) && region.contains(&entry.end) {
-                    memories.push(Range::from(region.start..entry.start));
-                    memories.push(Range::from(entry.end..region.end));
-                } else if entry.contains(&region.start) {
-                    region.start = entry.end;
-                    memories.push(region);
-                } else if entry.contains(&region.end) {
-                    region.end = entry.start;
-                    memories.push(region);
-                } else {
-                    memories.push(region);
+                if name.name == "cpu"
+                    && let Some(hartid) = name
+                        .unit_address
+                        .and_then(|addr| usize::from_str(addr).ok())
+                {
+                    // if the node is a CPU check its availability and populate the hart_mask
+
+                    let available =
+                        find_cstr_property(node.properties(), "status")? == Some(c"okay");
+
+                    if available {
+                        hart_mask |= 1 << hartid;
+                    }
+                } else if name.name == "memory"
+                    && find_cstr_property(node.properties(), "device_type")? == Some(c"memory")
+                {
+                    // if the node is a memory node, add it to the list of available memory regions
+
+                    let mut iter = find_property(node.properties(), "reg")?
+                        .unwrap()
+                        .as_regs(stack[depth - 1].unwrap().1);
+
+                    while let Some(reg) = iter.next()? {
+                        memories.push(Range::from(
+                            reg.starting_address..reg.starting_address + reg.size.unwrap_or(0),
+                        ));
+                    }
+                } else if stack[depth - 1].is_some_and(|(s, _)| s == "reserved-memory") {
+                    // if the node is a reserved-memory node, add it to the list of reserved memory regions
+
+                    let mut iter = find_property(node.properties(), "reg")?
+                        .unwrap()
+                        .as_regs(stack[depth - 1].unwrap().1);
+                    while let Some(reg) = iter.next()? {
+                        reserved_memory.push(Range::from(
+                            reg.starting_address..reg.starting_address + reg.size.unwrap_or(0),
+                        ));
+                    }
+                } else if name.name == "chosen" {
+                    // and finally if the node is the chosen node, extract the RNG seed
+
+                    rng_seed = find_property(node.properties(), "rng-seed")?.map(|prop| prop.raw);
                 }
+
+                // add the name and size_cells to the stack so we have it available for the next iteration
+                stack[depth] = Some((
+                    name.name,
+                    find_size_cells(node.properties(), &stack[depth - 1].as_ref().unwrap().1)?,
+                ));
             }
-        };
 
-        // Apply reserved_entries
-        while let Some(entry) = reservations.next()? {
-            let region = {
-                let start = usize::try_from(entry.address)?;
+            let mut exclude_region = |entry: Range<usize>| {
+                let _memories = memories.take();
 
-                Range::from(start..start.checked_add(usize::try_from(entry.size)?).unwrap())
+                for mut region in _memories {
+                    if entry.contains(&region.start) && entry.contains(&region.end) {
+                        // remove region
+                        continue;
+                    } else if region.contains(&entry.start) && region.contains(&entry.end) {
+                        memories.push(Range::from(region.start..entry.start));
+                        memories.push(Range::from(entry.end..region.end));
+                    } else if entry.contains(&region.start) {
+                        region.start = entry.end;
+                        memories.push(region);
+                    } else if entry.contains(&region.end) {
+                        region.end = entry.start;
+                        memories.push(region);
+                    } else {
+                        memories.push(region);
+                    }
+                }
             };
-            log::trace!("applying reservation {region:#x?}");
 
-            exclude_region(region);
-        }
+            // Apply reserved_entries
+            while let Some(entry) = reservations.next()? {
+                let region = {
+                    let start = usize::try_from(entry.address)?;
 
-        // Apply memory reservations
-        for reservation in reserved_memory {
-            log::trace!("applying reservation {reservation:#x?}");
+                    Range::from(start..start.checked_add(usize::try_from(entry.size)?).unwrap())
+                };
+                log::trace!("applying reservation {region:#x?}");
 
-            exclude_region(reservation);
-        }
-
-        // remove memory regions that are left as zero-sized from the previous step
-        memories.retain(|region| region.end.checked_sub(region.start).unwrap() > 0);
-
-        // page-align all memory regions, this will waste some physical memory in the process,
-        // but we can't make use of it either way
-        memories.iter_mut().for_each(|region| {
-            region.start = checked_align_up(region.start, PAGE_SIZE).unwrap();
-            region.end = align_down(region.end, PAGE_SIZE);
-        });
-
-        // ensure the memory regions are sorted.
-        // this is important for the allocation logic to be correct
-        memories.sort_unstable_by(|a, b| -> Ordering {
-            if a.end <= b.start {
-                Ordering::Less
-            } else if b.end <= a.start {
-                Ordering::Greater
-            } else {
-                // This should never happen if the `exclude_region` code about is correct
-                unreachable!("Memory region {a:?} and {b:?} are overlapping");
+                exclude_region(region);
             }
-        });
 
-        Ok(MachineInfo {
-            fdt: fdt_slice,
-            memories,
-            rng_seed,
-            hart_mask,
-        })
+            // Apply memory reservations
+            for reservation in reserved_memory {
+                log::trace!("applying reservation {reservation:#x?}");
+
+                exclude_region(reservation);
+            }
+
+            // remove memory regions that are left as zero-sized from the previous step
+            memories.retain(|region| region.end.checked_sub(region.start).unwrap() > 0);
+
+            // page-align all memory regions, this will waste some physical memory in the process,
+            // but we can't make use of it either way
+            memories.iter_mut().for_each(|region| {
+                region.start = checked_align_up(region.start, PAGE_SIZE).unwrap();
+                region.end = align_down(region.end, PAGE_SIZE);
+            });
+
+            // ensure the memory regions are sorted.
+            // this is important for the allocation logic to be correct
+            memories.sort_unstable_by(|a, b| -> Ordering {
+                if a.end <= b.start {
+                    Ordering::Less
+                } else if b.end <= a.start {
+                    Ordering::Greater
+                } else {
+                    // This should never happen if the `exclude_region` code about is correct
+                    unreachable!("Memory region {a:?} and {b:?} are overlapping");
+                }
+            });
+
+            Ok(MachineInfo {
+                fdt: fdt_slice,
+                memories,
+                rng_seed,
+                hart_mask,
+            })
         }
     }
 

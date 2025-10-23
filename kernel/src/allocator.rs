@@ -7,10 +7,12 @@
 // copied, modified, or distributed except according to those terms.
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{Ordering};
 use core::range::Range;
+use core::sync::atomic::Ordering;
 
 use loader_api::BootInfo;
+#[cfg(target_arch = "x86_64")]
+use talc::locking::AssumeUnlockable;
 use talc::{ErrOnOom, Span, Talc, Talck};
 
 use crate::mem::bootstrap_alloc::BootstrapAllocator;
@@ -30,7 +32,12 @@ unsafe fn serial_out(byte: u8) {
 #[repr(align(64))]
 struct Aligned<T>(core::mem::MaybeUninit<T>);
 
-static mut TALC_STORAGE: Aligned<Talck<spin::RawMutex, ErrOnOom>> =
+#[cfg(target_arch = "x86_64")]
+type TalcLock = AssumeUnlockable;
+#[cfg(not(target_arch = "x86_64"))]
+type TalcLock = spin::RawMutex;
+
+static mut TALC_STORAGE: Aligned<Talck<TalcLock, ErrOnOom>> =
     Aligned(core::mem::MaybeUninit::uninit());
 
 pub struct KernelAllocator;
@@ -83,8 +90,10 @@ pub fn init(boot_alloc: &mut BootstrapAllocator, boot_info: &BootInfo) {
         let start = base.checked_add(phys.get()).unwrap();
         #[cfg(target_arch = "x86_64")]
         unsafe {
-            serial_out(b'B'); print_u64_hex(base as u64);
-            serial_out(b'S'); print_u64_hex(start as u64);
+            serial_out(b'B');
+            print_u64_hex(base as u64);
+            serial_out(b'S');
+            print_u64_hex(start as u64);
         }
         Range::from(start..start.checked_add(layout.size()).unwrap())
     };
@@ -92,11 +101,16 @@ pub fn init(boot_alloc: &mut BootstrapAllocator, boot_info: &BootInfo) {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         serial_out(b'M');
-        serial_out(b's'); print_u64_hex(boot_info.physical_memory_map.start as u64);
-        serial_out(b'e'); print_u64_hex(boot_info.physical_memory_map.end as u64);
-        serial_out(b'v'); print_u64_hex(virt.start as u64);
-        serial_out(b'p'); print_u64_hex(phys.get() as u64);
-        serial_out(b'l'); print_u64_hex(layout.size() as u64);
+        serial_out(b's');
+        print_u64_hex(boot_info.physical_memory_map.start as u64);
+        serial_out(b'e');
+        print_u64_hex(boot_info.physical_memory_map.end as u64);
+        serial_out(b'v');
+        print_u64_hex(virt.start as u64);
+        serial_out(b'p');
+        print_u64_hex(phys.get() as u64);
+        serial_out(b'l');
+        print_u64_hex(layout.size() as u64);
         serial_out(b'V');
     }
     // Build initial heap span
@@ -119,7 +133,10 @@ pub fn init(boot_alloc: &mut BootstrapAllocator, boot_info: &BootInfo) {
         // debug: 'T' before TALC_STORAGE write
         #[cfg(target_arch = "x86_64")]
         serial_out(b'T');
-        TALC_STORAGE.0.as_mut_ptr().write(Talc::new(ErrOnOom).lock());
+        TALC_STORAGE
+            .0
+            .as_mut_ptr()
+            .write(Talc::new(ErrOnOom).lock());
         #[cfg(target_arch = "x86_64")]
         serial_out(b't');
         // Instance is available; we avoid allocations until span configured below
@@ -149,7 +166,7 @@ pub fn init(boot_alloc: &mut BootstrapAllocator, boot_info: &BootInfo) {
     // FIXME: Skip tracing::debug on x86_64 as it may hang
     #[cfg(not(target_arch = "x86_64"))]
     tracing::debug!("Kernel Heap: {virt:#x?}");
-    
+
     // debug: 'Z' leaving allocator::init
     #[cfg(target_arch = "x86_64")]
     unsafe {
@@ -159,11 +176,15 @@ pub fn init(boot_alloc: &mut BootstrapAllocator, boot_info: &BootInfo) {
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn print_nibble_hex(n: u8) { let ch = if n < 10 { b'0' + n } else { b'a' + (n - 10) }; serial_out(ch); }
+pub unsafe fn print_nibble_hex(n: u8) {
+    let ch = if n < 10 { b'0' + n } else { b'a' + (n - 10) };
+    serial_out(ch);
+}
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn print_u64_hex(mut v: u64) {
+pub unsafe fn print_u64_hex(mut v: u64) {
     for shift in (0..64).step_by(4).rev() {
-        let nib = ((v >> shift) & 0xF) as u8; print_nibble_hex(nib);
+        let nib = ((v >> shift) & 0xF) as u8;
+        print_nibble_hex(nib);
     }
 }

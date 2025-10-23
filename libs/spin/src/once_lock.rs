@@ -54,7 +54,11 @@ impl<T> OnceLock<T> {
                 unsafe {
                     let p = (*data).as_mut_ptr() as usize;
                     let nib = (p & 0xF) as u8;
-                    let ch = if nib < 10 { b'0' + nib } else { b'a' + (nib - 10) };
+                    let ch = if nib < 10 {
+                        b'0' + nib
+                    } else {
+                        b'a' + (nib - 10)
+                    };
                     core::arch::asm!(
                         "out dx, al",
                         in("al") ch,

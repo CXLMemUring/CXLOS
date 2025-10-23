@@ -1,12 +1,10 @@
-use alloc::string::String;
+use alloc::string::{String, ToString};
 
-use alloc::string::ToString;
 use spin::{Mutex, OnceLock};
 use wasmparser::Validator;
 
-use crate::wasm::{Engine, Module, Store, Val};
 use crate::wasm::linker::Linker;
-use crate::wasm::Memory;
+use crate::wasm::{Engine, Memory, Module, Store, Val};
 
 struct BusyboxWasm {
     store: Store<()>,
@@ -48,13 +46,20 @@ pub fn is_initialized() -> bool {
 /// Call an exported command with no argv (argc=1, argv=0). Suitable for
 /// commands like pwd/uname/date/whoami/free and ls (defaults to "/").
 pub fn call_export_noargs(name: &str) -> crate::Result<bool> {
-    let Some(lock) = BUSYBOX_WASM.get() else { return Ok(false) };
+    let Some(lock) = BUSYBOX_WASM.get() else {
+        return Ok(false);
+    };
     let mut bb = lock.lock();
     if let Some(func) = bb.instance.get_func(&mut *bb.store, name) {
         let ty = func.ty(&*bb.store);
-    let mut results_buf: alloc::vec::Vec<Val> = alloc::vec::Vec::with_capacity(ty.results().len());
-    results_buf.resize(ty.results().len(), Val::I32(0));
-    func.call(&mut *bb.store, &[Val::I32(1), Val::I32(0)], &mut results_buf)?;
+        let mut results_buf: alloc::vec::Vec<Val> =
+            alloc::vec::Vec::with_capacity(ty.results().len());
+        results_buf.resize(ty.results().len(), Val::I32(0));
+        func.call(
+            &mut *bb.store,
+            &[Val::I32(1), Val::I32(0)],
+            &mut results_buf,
+        )?;
         return Ok(true);
     }
     Ok(false)
@@ -62,14 +67,20 @@ pub fn call_export_noargs(name: &str) -> crate::Result<bool> {
 
 /// Call an exported command with string arguments (argv[0] = name; argv[1..] = args)
 pub fn call_export_args(name: &str, args: &[&str]) -> crate::Result<bool> {
-    let Some(lock) = BUSYBOX_WASM.get() else { return Ok(false) };
+    let Some(lock) = BUSYBOX_WASM.get() else {
+        return Ok(false);
+    };
     let mut bb = lock.lock();
 
     // Find exported function
-    let Some(func) = bb.instance.get_func(&mut *bb.store, name) else { return Ok(false) };
+    let Some(func) = bb.instance.get_func(&mut *bb.store, name) else {
+        return Ok(false);
+    };
 
     // Get default memory export
-    let Some(mem) = bb.instance.get_memory(&mut *bb.store, "memory") else { return Ok(false) };
+    let Some(mem) = bb.instance.get_memory(&mut *bb.store, "memory") else {
+        return Ok(false);
+    };
 
     // Allocate a simple scratch region near offset 0x2000
     // Layout: strings then argv array of i32 pointers
@@ -85,9 +96,13 @@ pub fn call_export_args(name: &str, args: &[&str]) -> crate::Result<bool> {
     for s in &all_args {
         let bytes = s.as_bytes();
         let ok = unsafe { mem.write(&*bb.store, offset, bytes) };
-        if !ok { return Ok(false); }
+        if !ok {
+            return Ok(false);
+        }
         let ok = unsafe { mem.write(&*bb.store, offset + bytes.len(), &[0]) };
-        if !ok { return Ok(false); }
+        if !ok {
+            return Ok(false);
+        }
         ptrs.push(offset as i32);
         offset += bytes.len() + 1;
     }
@@ -99,7 +114,9 @@ pub fn call_export_args(name: &str, args: &[&str]) -> crate::Result<bool> {
     for p in &ptrs {
         let le = p.to_le_bytes();
         let ok = unsafe { mem.write(&*bb.store, offset, &le) };
-        if !ok { return Ok(false); }
+        if !ok {
+            return Ok(false);
+        }
         offset += 4;
     }
 
@@ -107,7 +124,11 @@ pub fn call_export_args(name: &str, args: &[&str]) -> crate::Result<bool> {
     let ty = func.ty(&*bb.store);
     let mut results_buf: alloc::vec::Vec<Val> = alloc::vec::Vec::with_capacity(ty.results().len());
     results_buf.resize(ty.results().len(), Val::I32(0));
-    func.call(&mut *bb.store, &[Val::I32(argc), Val::I32(argv_ptr)], &mut results_buf)?;
+    func.call(
+        &mut *bb.store,
+        &[Val::I32(argc), Val::I32(argv_ptr)],
+        &mut results_buf,
+    )?;
     Ok(true)
 }
 
@@ -127,12 +148,16 @@ fn cmd_index(name: &str) -> Option<i32> {
 
 /// Preferred route: call busybox_main(argc, argv, cmd_index). Falls back to per-export if absent.
 pub fn call_busybox(name: &str, args: &[&str]) -> crate::Result<bool> {
-    let Some(lock) = BUSYBOX_WASM.get() else { return Ok(false) };
+    let Some(lock) = BUSYBOX_WASM.get() else {
+        return Ok(false);
+    };
     let mut bb = lock.lock();
 
     if let Some(main) = bb.instance.get_func(&mut *bb.store, "busybox_main") {
         // build argv as in call_export_args
-        let Some(mem) = bb.instance.get_memory(&mut *bb.store, "memory") else { return Ok(false) };
+        let Some(mem) = bb.instance.get_memory(&mut *bb.store, "memory") else {
+            return Ok(false);
+        };
         let mut offset: usize = 0x3000;
         let mut ptrs: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
         let mut all_args: alloc::vec::Vec<&str> = alloc::vec::Vec::with_capacity(args.len() + 1);
@@ -141,25 +166,44 @@ pub fn call_busybox(name: &str, args: &[&str]) -> crate::Result<bool> {
         for s in &all_args {
             let bytes = s.as_bytes();
             let ok = unsafe { mem.write(&*bb.store, offset, bytes) };
-            if !ok { return Ok(false); }
+            if !ok {
+                return Ok(false);
+            }
             let ok = unsafe { mem.write(&*bb.store, offset + bytes.len(), &[0]) };
-            if !ok { return Ok(false); }
+            if !ok {
+                return Ok(false);
+            }
             ptrs.push(offset as i32);
             offset += bytes.len() + 1;
         }
         offset = (offset + 3) & !3; // align
         let argv_ptr = offset as i32;
-        for p in &ptrs { let le = p.to_le_bytes(); if unsafe { !mem.write(&*bb.store, offset, &le) } { return Ok(false); } offset += 4; }
+        for p in &ptrs {
+            let le = p.to_le_bytes();
+            if unsafe { !mem.write(&*bb.store, offset, &le) } {
+                return Ok(false);
+            }
+            offset += 4;
+        }
         let argc = all_args.len() as i32;
         let cmd = cmd_index(name).unwrap_or(-1);
         if cmd >= 0 {
             let ty = main.ty(&*bb.store);
-            let mut results_buf: alloc::vec::Vec<Val> = alloc::vec::Vec::with_capacity(ty.results().len());
+            let mut results_buf: alloc::vec::Vec<Val> =
+                alloc::vec::Vec::with_capacity(ty.results().len());
             results_buf.resize(ty.results().len(), Val::I32(0));
-            main.call(&mut *bb.store, &[Val::I32(argc), Val::I32(argv_ptr), Val::I32(cmd)], &mut results_buf)?;
+            main.call(
+                &mut *bb.store,
+                &[Val::I32(argc), Val::I32(argv_ptr), Val::I32(cmd)],
+                &mut results_buf,
+            )?;
             return Ok(true);
         }
     }
     // fallback
-    if args.is_empty() { call_export_noargs(name) } else { call_export_args(name, args) }
+    if args.is_empty() {
+        call_export_noargs(name)
+    } else {
+        call_export_args(name, args)
+    }
 }

@@ -245,67 +245,66 @@ impl FallibleIterator for ArenaSelections {
 
     fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
         while let Some(mut arena) = self.free_regions.pop() {
+            while let Some(region) = self.free_regions.pop() {
+                tracing::debug!(arena.end=?arena.end,region=?region, "Attempting to add free region");
 
-        while let Some(region) = self.free_regions.pop() {
-            tracing::debug!(arena.end=?arena.end,region=?region, "Attempting to add free region");
+                debug_assert!(!arena.is_overlapping(&region));
 
-            debug_assert!(!arena.is_overlapping(&region));
-
-            let pages_in_hole = if arena.end <= region.start {
-                // the region is higher than the current arena
-                region.start.checked_sub_addr(arena.end).unwrap() / arch::PAGE_SIZE
-            } else {
-                debug_assert!(region.end <= arena.start);
-                // the region is lower than the current arena
-                arena.start.checked_sub_addr(region.end).unwrap() / arch::PAGE_SIZE
-            };
-
-            let waste_from_hole = ARENA_PAGE_BOOKKEEPING_SIZE * pages_in_hole;
-
-            if self.wasted_bytes + waste_from_hole > MAX_WASTED_ARENA_BYTES {
-                tracing::trace!("waste from hole exceeded limits");
-                self.free_regions.push(region);
-                break;
-            } else {
-                self.wasted_bytes += waste_from_hole;
-
-                if arena.end <= region.start {
-                    arena.end = region.end;
+                let pages_in_hole = if arena.end <= region.start {
+                    // the region is higher than the current arena
+                    region.start.checked_sub_addr(arena.end).unwrap() / arch::PAGE_SIZE
                 } else {
-                    arena.start = region.start;
+                    debug_assert!(region.end <= arena.start);
+                    // the region is lower than the current arena
+                    arena.start.checked_sub_addr(region.end).unwrap() / arch::PAGE_SIZE
+                };
+
+                let waste_from_hole = ARENA_PAGE_BOOKKEEPING_SIZE * pages_in_hole;
+
+                if self.wasted_bytes + waste_from_hole > MAX_WASTED_ARENA_BYTES {
+                    tracing::trace!("waste from hole exceeded limits");
+                    self.free_regions.push(region);
+                    break;
+                } else {
+                    self.wasted_bytes += waste_from_hole;
+
+                    if arena.end <= region.start {
+                        arena.end = region.end;
+                    } else {
+                        arena.start = region.start;
+                    }
                 }
             }
-        }
 
-        let mut aligned = arena.checked_align_in(arch::PAGE_SIZE).unwrap();
-        let bookkeeping_size = bookkeeping_size(aligned.size());
+            let mut aligned = arena.checked_align_in(arch::PAGE_SIZE).unwrap();
+            let bookkeeping_size = bookkeeping_size(aligned.size());
 
-        // We can't use empty arenas anyway
-        if aligned.is_empty() {
-            tracing::warn!("arena is too small (empty), skipping");
-            continue;
-        }
+            // We can't use empty arenas anyway
+            if aligned.is_empty() {
+                tracing::warn!("arena is too small (empty), skipping");
+                continue;
+            }
 
-        let bookkeeping_start = aligned
-            .end
-            .checked_sub(bookkeeping_size)
-            .unwrap()
-            .align_down(arch::PAGE_SIZE);
+            let bookkeeping_start = aligned
+                .end
+                .checked_sub(bookkeeping_size)
+                .unwrap()
+                .align_down(arch::PAGE_SIZE);
 
-        // The arena has no space to hold its own bookkeeping
-        if bookkeeping_start < aligned.start {
-            tracing::warn!("arena is too small for bookkeeping, skipping {aligned:#x?}");
-            continue;
-        }
+            // The arena has no space to hold its own bookkeeping
+            if bookkeeping_start < aligned.start {
+                tracing::warn!("arena is too small for bookkeeping, skipping {aligned:#x?}");
+                continue;
+            }
 
-        let bookkeeping = Range::from(bookkeeping_start..aligned.end);
-        aligned.end = bookkeeping.start;
+            let bookkeeping = Range::from(bookkeeping_start..aligned.end);
+            aligned.end = bookkeeping.start;
 
-        return Ok(Some(ArenaSelection {
-            arena: aligned,
-            bookkeeping,
-            wasted_bytes: mem::take(&mut self.wasted_bytes),
-        }));
+            return Ok(Some(ArenaSelection {
+                arena: aligned,
+                bookkeeping,
+                wasted_bytes: mem::take(&mut self.wasted_bytes),
+            }));
         }
         Ok(None)
     }

@@ -1,8 +1,9 @@
-use super::FsError;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
+
+use super::FsError;
 
 /// File type enumeration
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -210,9 +211,10 @@ impl VirtualFileSystem {
             return Err(FsError::AlreadyExists);
         }
 
-        parent
-            .children
-            .push((filename.clone(), Box::new(FileNode::new_file(filename, content.to_vec()))));
+        parent.children.push((
+            filename.clone(),
+            Box::new(FileNode::new_file(filename, content.to_vec())),
+        ));
 
         Ok(())
     }

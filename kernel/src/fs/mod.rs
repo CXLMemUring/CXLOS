@@ -4,6 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
+
 use spin::RwLock;
 
 #[cfg(target_arch = "x86_64")]
@@ -19,7 +20,7 @@ unsafe fn serial_out(byte: u8) {
 
 pub mod vfs;
 
-pub use vfs::{VirtualFileSystem, FileNode, FileType, FileSystem, FileStat};
+pub use vfs::{FileNode, FileStat, FileSystem, FileType, VirtualFileSystem};
 
 /// Global virtual filesystem instance
 static VFS: RwLock<Option<VirtualFileSystem>> = RwLock::new(None);
@@ -28,7 +29,9 @@ static VFS: RwLock<Option<VirtualFileSystem>> = RwLock::new(None);
 pub fn init() -> crate::Result<()> {
     // probe: 'S' entering fs::init
     #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'S'); }
+    unsafe {
+        serial_out(b'S');
+    }
 
     let mut vfs_guard = VFS.write();
     let mut vfs = VirtualFileSystem::new();
@@ -45,7 +48,9 @@ pub fn init() -> crate::Result<()> {
     vfs.mkdir("/var")?;
     // probe: 'M' after mkdirs
     #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'M'); }
+    unsafe {
+        serial_out(b'M');
+    }
 
     // Create some basic files
     vfs.create_file("/etc/hostname", b"k23\n")?;
@@ -55,11 +60,15 @@ pub fn init() -> crate::Result<()> {
     vfs.create_file("/proc/cmdline", b"console=ttyS0\n")?;
     // probe: 'C' after create_file batch
     #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'C'); }
+    unsafe {
+        serial_out(b'C');
+    }
     *vfs_guard = Some(vfs);
     // probe: 's' stored VFS
     #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b's'); }
+    unsafe {
+        serial_out(b's');
+    }
     Ok(())
 }
 

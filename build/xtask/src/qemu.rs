@@ -5,6 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -71,12 +72,15 @@ pub fn spawn(
             cmd
         }
         Architecture::X86_64 => {
-            let mut cmd = Command::new("/storage/qemu/build/qemu-system-x86_64");
-            // println!("{}", image.to_str().unwrap());
+            let mut cmd = Command::new("qemu-system-x86_64");
+            match kvm_available() {
+                Ok(()) => cmd.args(["--enable-kvm", "-cpu", "host"]),
+                Err(err) => {
+                    eprintln!("warning: KVM unavailable ({err}); falling back to TCG");
+                    cmd.args(["-accel", "tcg", "-cpu", "qemu64"])
+                }
+            };
             cmd.args([
-                "--enable-kvm",
-                "-cpu",
-                "host",
                 "-serial",
                 "mon:stdio",
                 "-no-shutdown",
@@ -121,4 +125,10 @@ pub fn spawn(
     Ok(KillOnDrop(
         cmd.spawn().expect("Failed to spawn qemu. Is it installed?"),
     ))
+}
+
+fn kvm_available() -> std::io::Result<()> {
+    let file = OpenOptions::new().read(true).write(true).open("/dev/kvm")?;
+    drop(file);
+    Ok(())
 }

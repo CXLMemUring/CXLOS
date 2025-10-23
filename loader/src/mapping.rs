@@ -13,10 +13,9 @@ use core::{cmp, ptr, slice};
 use bitflags::bitflags;
 use fallible_iterator::FallibleIterator;
 use loader_api::TlsTemplate;
-use xmas_elf::P64;
 use xmas_elf::dynamic::Tag;
 use xmas_elf::program::{SegmentData, Type};
-use xmas_elf::sections;
+use xmas_elf::{P64, sections};
 
 use crate::error::Error;
 use crate::frame_alloc::FrameAllocator;
@@ -159,7 +158,9 @@ pub fn map_kernel(
     for ph in kernel.elf_file.program_iter() {
         let mem = usize::try_from(ph.mem_size()).unwrap_or(0);
         let align = usize::try_from(ph.align()).unwrap_or(1);
-        if mem == 0 || align < crate::arch::PAGE_SIZE { continue; }
+        if mem == 0 || align < crate::arch::PAGE_SIZE {
+            continue;
+        }
         let v = usize::try_from(ph.virtual_addr()).unwrap_or(0);
         min_vaddr = core::cmp::min(min_vaddr, v);
         max_vaddr = core::cmp::max(max_vaddr, v.saturating_add(mem));
@@ -171,19 +172,24 @@ pub fn map_kernel(
         let start = align_down(min_vaddr, usize::try_from(kernel.max_align())?);
         let end = checked_align_up(max_vaddr, usize::try_from(kernel.max_align())?).unwrap();
         let range = Range::from(start..end);
-        log::trace!("map_kernel: Linked-at-VA. Using direct virtual range {:#x?}", range);
+        log::trace!(
+            "map_kernel: Linked-at-VA. Using direct virtual range {:#x?}",
+            range
+        );
         (range, 0usize)
     } else {
         // Allocate a virtual base for the image and map segments relative to it
-        let range = page_alloc
-            .allocate(
-                Layout::from_size_align(
-                    usize::try_from(kernel.mem_size())?,
-                    usize::try_from(kernel.max_align())?,
-                )
-                .unwrap(),
-            );
-        log::trace!("map_kernel: PIE image. Allocated virtual range {:#x?}", range);
+        let range = page_alloc.allocate(
+            Layout::from_size_align(
+                usize::try_from(kernel.mem_size())?,
+                usize::try_from(kernel.max_align())?,
+            )
+            .unwrap(),
+        );
+        log::trace!(
+            "map_kernel: PIE image. Allocated virtual range {:#x?}",
+            range
+        );
         (range, range.start)
     };
 
@@ -193,20 +199,25 @@ pub fn map_kernel(
     // On RISC-V: after MMU, pointer is virtual (phys + phys_off), need to subtract
     let phys_base = if cfg!(target_arch = "riscv64") && phys_off != 0 {
         // RISC-V with MMU on: subtract offset to get physical address
-        (kernel.elf_file.input.as_ptr() as usize).checked_sub(phys_off).unwrap()
+        (kernel.elf_file.input.as_ptr() as usize)
+            .checked_sub(phys_off)
+            .unwrap()
     } else {
         // x86_64 (always identity mapped) or RISC-V before MMU
         kernel.elf_file.input.as_ptr() as usize
     };
 
     log::trace!("map_kernel: phys_base={:#x}", phys_base);
-    
+
     if phys_base >= 0x1000000000 {
         log::error!("ERROR: phys_base is suspiciously high: {:#x}", phys_base);
-        log::error!("  kernel.elf_file.input.as_ptr() = {:p}", kernel.elf_file.input.as_ptr());
+        log::error!(
+            "  kernel.elf_file.input.as_ptr() = {:p}",
+            kernel.elf_file.input.as_ptr()
+        );
         log::error!("  phys_off = {:#x}", phys_off);
     }
-    
+
     assert!(
         phys_base.is_multiple_of(arch::PAGE_SIZE),
         "Loaded ELF file is not sufficiently aligned"
@@ -216,7 +227,11 @@ pub fn map_kernel(
 
     // Compute the effective entry VA for mapping (linked-at-VA vs PIE)
     let elf_entry = usize::try_from(kernel.elf_file.header.pt2.entry_point())?;
-    let entry_va = if linked_at_va { elf_entry } else { virt_base_for_map.checked_add(elf_entry).unwrap() };
+    let entry_va = if linked_at_va {
+        elf_entry
+    } else {
+        virt_base_for_map.checked_add(elf_entry).unwrap()
+    };
 
     // Load the segments into virtual memory.
     for raw_ph in kernel.elf_file.program_iter() {
@@ -234,7 +249,11 @@ pub fn map_kernel(
                 minfo,
                 phys_off,
             )?);
-            log::trace!("TLS detected in segment vaddr={:#x} size={:#x}", ph.virtual_address, ph.mem_size);
+            log::trace!(
+                "TLS detected in segment vaddr={:#x} size={:#x}",
+                ph.virtual_address,
+                ph.mem_size
+            );
             if old.is_some() {
                 log::warn!("Multiple TLS segments detected; ignoring subsequent ones");
             }
@@ -311,38 +330,57 @@ fn handle_load_segment(
     let phys = {
         let start = phys_base.checked_add(ph.offset).unwrap();
         let end = start.checked_add(ph.file_size).unwrap();
-        
+
         // Debug: Check first few bytes at this physical location
         if ph.virtual_address <= 0x2b8 && ph.virtual_address + ph.mem_size > 0x2b8 {
             let entry_file_offset = ph.offset + (0x2b8 - ph.virtual_address);
-            log::trace!("Segment containing entry 0x2b8: offset={:#x} vaddr={:#x} filesz={:#x}", 
-                       ph.offset, ph.virtual_address, ph.file_size);
-            log::trace!("Entry point 0x2b8 is at file offset {:#x}", entry_file_offset);
+            log::trace!(
+                "Segment containing entry 0x2b8: offset={:#x} vaddr={:#x} filesz={:#x}",
+                ph.offset,
+                ph.virtual_address,
+                ph.file_size
+            );
+            log::trace!(
+                "Entry point 0x2b8 is at file offset {:#x}",
+                entry_file_offset
+            );
             unsafe {
                 let entry_ptr = (phys_base + entry_file_offset) as *const u8;
                 let entry_bytes: [u8; 16] = core::ptr::read_unaligned(entry_ptr as *const [u8; 16]);
-                log::trace!("Entry bytes at file offset {:#x}: {:02x?}", entry_file_offset, entry_bytes);
+                log::trace!(
+                    "Entry bytes at file offset {:#x}: {:02x?}",
+                    entry_file_offset,
+                    entry_bytes
+                );
             }
         }
-        
-        Range::from(align_down(start, arch::PAGE_SIZE)..checked_align_up(end, arch::PAGE_SIZE).unwrap())
+
+        Range::from(
+            align_down(start, arch::PAGE_SIZE)..checked_align_up(end, arch::PAGE_SIZE).unwrap(),
+        )
     };
 
     let virt = {
         // If virt_base==0 we are mapping at linked VA; otherwise map at PIE base
         let start = virt_base.checked_add(ph.virtual_address).unwrap();
         let end = start.checked_add(ph.file_size).unwrap();
-        Range::from(align_down(start, arch::PAGE_SIZE)..checked_align_up(end, arch::PAGE_SIZE).unwrap())
+        Range::from(
+            align_down(start, arch::PAGE_SIZE)..checked_align_up(end, arch::PAGE_SIZE).unwrap(),
+        )
     };
 
     log::trace!("mapping {virt:#x?} => {phys:#x?}");
-    
+
     if phys.start >= 0x1000000000 || phys.end >= 0x1000000000 {
         log::error!("ERROR: Suspicious physical address range: {:#x?}", phys);
-        log::error!("  phys_base={:#x}, ph.offset={:#x}, ph.file_size={:#x}", 
-                   phys_base, ph.offset, ph.file_size);
+        log::error!(
+            "  phys_base={:#x}, ph.offset={:#x}, ph.file_size={:#x}",
+            phys_base,
+            ph.offset,
+            ph.file_size
+        );
     }
-    
+
     // Safety: Leaving the address space in an invalid state here is fine since on panic we'll
     // abort startup anyway
     unsafe {
@@ -530,7 +568,9 @@ fn handle_dynamic_relocations(
             let filesz = usize::try_from(ph.file_size()).unwrap_or(0);
             let memsz = usize::try_from(ph.mem_size()).unwrap_or(0);
             let align = usize::try_from(ph.align()).unwrap_or(1);
-            if memsz == 0 || align < crate::arch::PAGE_SIZE { continue; }
+            if memsz == 0 || align < crate::arch::PAGE_SIZE {
+                continue;
+            }
             let vaddr = usize::try_from(ph.virtual_addr()).unwrap_or(0);
             let off = usize::try_from(ph.offset()).unwrap_or(0);
             load_segments.push((vaddr, off, filesz));
@@ -551,16 +591,15 @@ fn handle_dynamic_relocations(
             } else {
                 0
             };
-            log::trace!(
-                "RELA[0] raw: w0(off)={:#x} w1={:#x} w2={:#x}",
-                w0,
-                w1,
-                w2
-            );
+            log::trace!("RELA[0] raw: w0(off)={:#x} w1={:#x} w2={:#x}", w0, w1, w2);
         }
 
         #[derive(Copy, Clone)]
-        struct Reloc { rtype: u32, offset: usize, addend: isize }
+        struct Reloc {
+            rtype: u32,
+            offset: usize,
+            addend: isize,
+        }
         let mut to_apply: alloc::vec::Vec<Reloc> = alloc::vec::Vec::with_capacity(count);
 
         for i in 0..count {
@@ -627,7 +666,11 @@ fn handle_dynamic_relocations(
             //     addend
             // );
 
-            to_apply.push(Reloc { rtype, offset, addend });
+            to_apply.push(Reloc {
+                rtype,
+                offset,
+                addend,
+            });
         }
 
         // Apply after decoupling from source bytes
@@ -656,8 +699,12 @@ fn is_tls_segment(ph: &ProgramHeader, elf_file: &xmas_elf::ElfFile) -> bool {
     for sh in elf_file.section_iter() {
         // Skip sections with zero size or without TLS flag
         let size = sh.size();
-        if size == 0 { continue; }
-        if (sh.flags() & sections::SHF_TLS) == 0 { continue; }
+        if size == 0 {
+            continue;
+        }
+        if (sh.flags() & sections::SHF_TLS) == 0 {
+            continue;
+        }
 
         let s_start = sh.address();
         let s_end = s_start.saturating_add(size);
@@ -700,7 +747,7 @@ fn apply_relocation(
     const R_X86_64_TPOFF64: u32 = 45; // TLS LE offset
 
     // log::trace!("reloc type={} offset={:#x} addend={:#x}", rtype, offset, addend);
-    
+
     // Skip relocations that would modify the ELF header or other metadata
     // The first page contains the ELF header and program headers
     if offset < 0x1000 {
@@ -710,7 +757,7 @@ fn apply_relocation(
         );
         return;
     }
-    
+
     if offset >= image_limit {
         log::warn!(
             "Skipping relocation: target offset {:#x} beyond image limit {:#x}",
@@ -794,9 +841,7 @@ fn apply_relocation(
             }
             #[cfg(not(target_arch = "x86_64"))]
             {
-                unimplemented!(
-                    "x86_64 PC32 relocation encountered on non-x86_64 target"
-                );
+                unimplemented!("x86_64 PC32 relocation encountered on non-x86_64 target");
             }
         }
         // x86_64 TLS: for a statically-linked single module, DTPMOD64 is 1
@@ -914,16 +959,27 @@ fn handle_tls_segment(
 
     // Compute source address of TLS initializer bytes from the ELF file buffer.
     // PT_TLS data lives in the file image and is not mapped into the kernel's virtual image.
+    // After MMU is activated, we must access physical memory through the physical window.
     let template_src = {
         #[cfg(target_arch = "x86_64")]
         {
-            // Kernel ELF is identity-mapped, read directly from file buffer
-            phys_base.checked_add(ph.offset).unwrap()
+            // On x86_64, after MMU is active, we must access physical memory through
+            // the physical window (phys_off + phys_addr), not directly via identity mapping,
+            // because the loader's identity mappings may not persist when kernel takes over.
+            phys_off
+                .checked_add(phys_base)
+                .unwrap()
+                .checked_add(ph.offset)
+                .unwrap()
         }
         #[cfg(target_arch = "riscv64")]
         {
             // Kernel ELF must be accessed through the physical window after MMU
-            phys_off.checked_add(phys_base).unwrap().checked_add(ph.offset).unwrap()
+            phys_off
+                .checked_add(phys_base)
+                .unwrap()
+                .checked_add(ph.offset)
+                .unwrap()
         }
     };
 
@@ -993,45 +1049,69 @@ impl TlsAllocation {
 
             // First, copy the initialized data if any
             if self.template.file_size != 0 {
-                log::trace!(
-                    "TLS copy: hart={} src={:#x} -> dst={:#x} size={}",
-                    hartid,
-                    self.template.start_addr,
-                    region.start,
-                    self.template.file_size
-                );
-                let src: &[u8] = slice::from_raw_parts(
-                    self.template.start_addr as *const u8,
-                    self.template.file_size,
-                );
-                let dst: &mut [u8] =
-                    slice::from_raw_parts_mut(region.start as *mut u8, self.template.file_size);
-
-                // sanity check to ensure our destination allocated memory is actually zeroed.
-                // if it's not, that likely means we're about to override something important
                 #[cfg(target_arch = "x86_64")]
                 {
-                    // On x86_64, we already wrote the TLS self-pointer at offset 0
-                    // Check that everything except the first 8 bytes is zero
-                    debug_assert!(dst[8..].iter().all(|&x| x == 0));
+                    // On x86_64 TLS variant II, offset 0 is reserved for the self-pointer.
+                    // We skip the first 8 bytes of the template to preserve the self-pointer.
+                    log::trace!(
+                        "TLS copy: hart={} src={:#x}+8 -> dst={:#x}+8 size={} (skipping self-pointer)",
+                        hartid,
+                        self.template.start_addr,
+                        region.start,
+                        self.template.file_size.saturating_sub(8)
+                    );
+
+                    if self.template.file_size > 8 {
+                        let src: &[u8] = slice::from_raw_parts(
+                            (self.template.start_addr + 8) as *const u8,
+                            self.template.file_size - 8,
+                        );
+                        let dst: &mut [u8] = slice::from_raw_parts_mut(
+                            (region.start + 8) as *mut u8,
+                            self.template.file_size - 8,
+                        );
+
+                        // Sanity check: destination should be zeroed
+                        debug_assert!(dst.iter().all(|&x| x == 0));
+
+                        dst.copy_from_slice(src);
+                        log::trace!("TLS copy complete: hart={}", hartid);
+                    } else {
+                        log::trace!("TLS template <= 8 bytes, only self-pointer needed");
+                    }
                 }
                 #[cfg(not(target_arch = "x86_64"))]
                 {
+                    log::trace!(
+                        "TLS copy: hart={} src={:#x} -> dst={:#x} size={}",
+                        hartid,
+                        self.template.start_addr,
+                        region.start,
+                        self.template.file_size
+                    );
+                    let src: &[u8] = slice::from_raw_parts(
+                        self.template.start_addr as *const u8,
+                        self.template.file_size,
+                    );
+                    let dst: &mut [u8] =
+                        slice::from_raw_parts_mut(region.start as *mut u8, self.template.file_size);
+
+                    // Sanity check: destination should be zeroed
                     debug_assert!(dst.iter().all(|&x| x == 0));
-                }
 
-                // Check if source contains the canary pattern
-                if src.len() >= 8 {
-                    let first_qword = u64::from_ne_bytes(src[0..8].try_into().unwrap());
-                    if first_qword == 0xACE0BACE {
-                        log::error!("TLS template source contains stack canary pattern!");
-                        log::error!("Template start_addr: {:#x}", self.template.start_addr);
-                        log::error!("First 64 bytes of source: {:x?}", &src[..64.min(src.len())]);
+                    // Check if source contains the canary pattern
+                    if src.len() >= 8 {
+                        let first_qword = u64::from_ne_bytes(src[0..8].try_into().unwrap());
+                        if first_qword == 0xACE0BACE {
+                            log::error!("TLS template source contains stack canary pattern!");
+                            log::error!("Template start_addr: {:#x}", self.template.start_addr);
+                            log::error!("First 64 bytes of source: {:x?}", &src[..64.min(src.len())]);
+                        }
                     }
-                }
 
-                dst.copy_from_slice(src);
-                log::trace!("TLS copy complete: hart={}", hartid);
+                    dst.copy_from_slice(src);
+                    log::trace!("TLS copy complete: hart={}", hartid);
+                }
             }
 
             // Then zero the BSS section (from file_size to mem_size)
@@ -1048,14 +1128,16 @@ impl TlsAllocation {
                 bss.fill(0);
             }
 
-            // For x86_64, ensure the self-pointer wasn't overwritten
+            // For x86_64, verify the self-pointer is still intact
             #[cfg(target_arch = "x86_64")]
             {
                 let tls_base_ptr = region.start as *mut usize;
-                if *tls_base_ptr != region.start {
-                    log::warn!("TLS self-pointer was overwritten, restoring it");
-                    *tls_base_ptr = region.start;
-                }
+                debug_assert!(
+                    *tls_base_ptr == region.start,
+                    "TLS self-pointer corrupted: expected {:#x}, got {:#x}",
+                    region.start,
+                    *tls_base_ptr
+                );
             }
 
             log::trace!("TLS init done: hart={}", hartid);
@@ -1164,9 +1246,9 @@ impl ProgramHeader<'_> {
 }
 
 struct RelaInfo {
-    pub offset: u64,      // Virtual address of RELA table
-    pub count: u64,       // Number of entries
-    pub entry_size: u64,  // Size of each entry in bytes
+    pub offset: u64,     // Virtual address of RELA table
+    pub count: u64,      // Number of entries
+    pub entry_size: u64, // Size of each entry in bytes
 }
 
 // Parse the .dynamic section to find DT_RELA/DT_RELASZ/DT_RELAENT without using
@@ -1205,9 +1287,15 @@ fn parse_rela_from_dynamic_section(
     let Some(offset) = rela else { return Ok(None) };
     let total = relasz.unwrap_or(0);
     let ent = relaent.unwrap_or(24);
-    if total == 0 || ent == 0 { return Ok(None) }
+    if total == 0 || ent == 0 {
+        return Ok(None);
+    }
 
-    Ok(Some(RelaInfo { offset, count: total / ent, entry_size: ent }))
+    Ok(Some(RelaInfo {
+        offset,
+        count: total / ent,
+        entry_size: ent,
+    }))
 }
 
 impl<'a> TryFrom<xmas_elf::program::ProgramHeader<'a>> for ProgramHeader<'a> {

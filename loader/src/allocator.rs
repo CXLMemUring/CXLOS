@@ -36,7 +36,10 @@ unsafe impl GlobalAlloc for LoaderAllocator {
         // Align current pointer
         let align_mask = layout.align().saturating_sub(1);
         let aligned = (base + *offset + align_mask) & !align_mask;
-        let new_offset = aligned.checked_add(layout.size()).unwrap().saturating_sub(base);
+        let new_offset = aligned
+            .checked_add(layout.size())
+            .unwrap()
+            .saturating_sub(base);
 
         if new_offset <= LOADER_HEAP_SIZE {
             *offset = new_offset;
@@ -64,4 +67,3 @@ fn oom(layout: Layout) -> ! {
     );
     abort::abort()
 }
-

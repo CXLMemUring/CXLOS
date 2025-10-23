@@ -11,13 +11,12 @@ use core::num::NonZero;
 use core::ptr::NonNull;
 
 use bitflags::bitflags;
+use loader_api::BootInfo;
 
-use crate::GlobalInitResult;
 use crate::frame_alloc::FrameAllocator;
 use crate::machine_info::MachineInfo;
 use crate::mapping::Flags;
-use crate::kernel;
-use loader_api::BootInfo;
+use crate::{GlobalInitResult, kernel};
 
 // PVH ELF Note to enable direct kernel loading like RISC-V
 // This allows QEMU to boot our kernel directly without a traditional bootloader
@@ -224,15 +223,18 @@ pub unsafe fn handoff_to_kernel(cpuid: usize, boot_ticks: u64, init: &GlobalInit
         init.kernel_entry,
         init.boot_info
     );
-    
+
     // Diagnostics: dump PTE chain/flags for kernel entry VA and first bytes from VA vs ELF file
     let bi = unsafe { &*(init.boot_info as *const BootInfo) };
-    
+
     // Log boot info details
     log::debug!("BootInfo details:");
-    log::debug!("  physical_address_offset: {:#x}", bi.physical_address_offset);
+    log::debug!(
+        "  physical_address_offset: {:#x}",
+        bi.physical_address_offset
+    );
     log::debug!("  physical_memory_map: {:#x?}", bi.physical_memory_map);
-    
+
     let phys_off = bi.physical_address_offset;
     dbg_dump_mapping(init.root_pgtable, init.kernel_entry, phys_off);
     // Ensure the entry page is executable in case segment flags were conservative
@@ -246,8 +248,11 @@ pub unsafe fn handoff_to_kernel(cpuid: usize, boot_ticks: u64, init: &GlobalInit
         log::trace!("Entry VA bytes: {:02x?}", &va_bytes);
         // Decode near CALL rel32 to get first branch target (e.g., _rust_start)
         if va_bytes[0] == 0xE8 {
-            let disp = i32::from_le_bytes([va_bytes[1], va_bytes[2], va_bytes[3], va_bytes[4]]) as isize;
-            let target = (init.kernel_entry as isize).wrapping_add(5).wrapping_add(disp) as usize;
+            let disp =
+                i32::from_le_bytes([va_bytes[1], va_bytes[2], va_bytes[3], va_bytes[4]]) as isize;
+            let target = (init.kernel_entry as isize)
+                .wrapping_add(5)
+                .wrapping_add(disp) as usize;
             call_target = Some(target);
             log::trace!("Entry CALL target: {:#x}", target);
             dbg_dump_mapping(init.root_pgtable, target, phys_off);
@@ -592,7 +597,11 @@ impl PageTableEntry {
 
     pub fn replace_address_and_flags(&mut self, address: usize, flags: PTEFlags) {
         // Ensure address only uses bits 51:12 (physical address must be < 2^52)
-        debug_assert!(address < (1usize << 52), "Physical address {:#x} exceeds 52-bit limit", address);
+        debug_assert!(
+            address < (1usize << 52),
+            "Physical address {:#x} exceeds 52-bit limit",
+            address
+        );
         // Clear and set bits properly
         self.bits = 0;
         // Only use bits 51:0 of address (aligned to 4K), and OR with flags
@@ -602,7 +611,7 @@ impl PageTableEntry {
     pub fn get_address_and_flags(&self) -> (usize, PTEFlags) {
         // On x86_64, bits 51:12 contain the physical frame number
         // Bits 63:52 and 11:0 contain flags
-        let addr = self.bits & 0x000FFFFFFFFFF000;  // Mask for bits 51:12
+        let addr = self.bits & 0x000FFFFFFFFFF000; // Mask for bits 51:12
         let flags = PTEFlags::from_bits_truncate(self.bits);
         (addr, flags)
     }
