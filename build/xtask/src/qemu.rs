@@ -82,7 +82,9 @@ pub fn spawn(
             };
             cmd.args([
                 "-serial",
-                "mon:stdio",
+                "stdio",
+                "-monitor",
+                "none",
                 "-no-shutdown",
                 "-no-reboot",
                 "-M", "q35,cxl=on", "-m", "4G", "-smp", "4",

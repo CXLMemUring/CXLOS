@@ -25,7 +25,6 @@
 
 extern crate alloc;
 
-use alloc::format;
 use alloc::string::ToString;
 extern crate panic_unwind2;
 
@@ -323,18 +322,101 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         // after backtrace::init
 
         // fully initialize the tracing subsystem now that we can allocate
-        tracing::init(bootargs.log);
-        // tracing ready
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            tracing::init(bootargs.log);
+        }
+        // On x86_64, skip tracing init to reach the shell quickly
         #[cfg(target_arch = "x86_64")]
         unsafe { serial_out(b't'); }
-        #[cfg(target_arch = "x86_64")]
-        unsafe { serial_out(b'<'); }
 
         // after tracing fully initialized
         // perform global, architecture-specific initialization
         let arch = arch::init();
         #[cfg(target_arch = "x86_64")]
         unsafe { serial_out(b'^'); }
+
+        // FAST PATH (x86_64): run a blocking serial console directly to ensure input works
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Minimal COM1 init
+            const COM1_BASE: u16 = 0x3F8;
+            const DATA_REG: u16 = COM1_BASE + 0;
+            const IER: u16 = COM1_BASE + 1;
+            const FCR: u16 = COM1_BASE + 2;
+            const LCR: u16 = COM1_BASE + 3;
+            const MCR: u16 = COM1_BASE + 4;
+            const LSR: u16 = COM1_BASE + 5;
+
+            unsafe {
+                // Disable interrupts
+                core::arch::asm!("out dx, al", in("dx") IER, in("al") 0u8, options(nomem, preserves_flags));
+                // Enable DLAB
+                core::arch::asm!("out dx, al", in("dx") LCR, in("al") 0x80u8, options(nomem, preserves_flags));
+                // Set baud 115200 (divisor 1)
+                core::arch::asm!("out dx, al", in("dx") DATA_REG, in("al") 0x01u8, options(nomem, preserves_flags));
+                core::arch::asm!("out dx, al", in("dx") IER, in("al") 0x00u8, options(nomem, preserves_flags));
+                // 8N1
+                core::arch::asm!("out dx, al", in("dx") LCR, in("al") 0x03u8, options(nomem, preserves_flags));
+                // Enable FIFO
+                core::arch::asm!("out dx, al", in("dx") FCR, in("al") 0xC7u8, options(nomem, preserves_flags));
+                // RTS/DSR, OUT2
+                core::arch::asm!("out dx, al", in("dx") MCR, in("al") 0x0Bu8, options(nomem, preserves_flags));
+            }
+
+            #[inline]
+            fn putb(b: u8) {
+                unsafe {
+                    // wait for THRE
+                    loop {
+                        let mut st: u8 = 0;
+                        core::arch::asm!("in al, dx", out("al") st, in("dx") LSR, options(nomem, preserves_flags));
+                        if st & 0x20 != 0 { break; }
+                    }
+                    core::arch::asm!("out dx, al", in("dx") DATA_REG, in("al") b, options(nomem, preserves_flags));
+                }
+            }
+            fn puts(s: &str) { for &b in s.as_bytes() { putb(b); } }
+            fn getb() -> Option<u8> {
+                unsafe {
+                    let mut st: u8 = 0;
+                    core::arch::asm!("in al, dx", out("al") st, in("dx") LSR, options(nomem, preserves_flags));
+                    if st & 0x01 == 0 { return None; }
+                    let mut d: u8 = 0;
+                    core::arch::asm!("in al, dx", out("al") d, in("dx") DATA_REG, options(nomem, preserves_flags));
+                    Some(d)
+                }
+            }
+
+            use alloc::string::String;
+            puts("\r\n> ");
+            let mut line = String::new();
+            loop {
+                if let Some(b) = getb() {
+                    match b as char {
+                        '\r' | '\n' => {
+                            putb(b'\r'); putb(b'\n');
+                            if !line.is_empty() {
+                                crate::shell::eval(&line);
+                                line.clear();
+                            }
+                            puts("> ");
+                        }
+                        '\x7F' | '\x08' => {
+                            if !line.is_empty() {
+                                line.pop();
+                                putb(b'\x08'); putb(b' '); putb(b'\x08');
+                            }
+                        }
+                        c if c.is_ascii() && !c.is_control() => {
+                            line.push(c);
+                            putb(b as u8);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
 
         // initialize the global frame allocator
         // at this point we have parsed and processed the flattened device tree, so we pass it to the

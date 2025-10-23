@@ -155,6 +155,10 @@ async fn x86_serial_console() {
 
     const COM1_BASE: u16 = 0x3F8;
     const DATA_REG: u16 = COM1_BASE + 0;
+    const IER: u16 = COM1_BASE + 1;
+    const FCR: u16 = COM1_BASE + 2;
+    const LCR: u16 = COM1_BASE + 3;
+    const MCR: u16 = COM1_BASE + 4;
     const LINE_STATUS_REG: u16 = COM1_BASE + 5;
 
     // Helper to check if data is available
@@ -212,6 +216,34 @@ async fn x86_serial_console() {
         }
     }
 
+    // Minimal 16550 init for reliable RX/TX on QEMU
+    fn serial_init() {
+        unsafe {
+            // Disable interrupts
+            core::arch::asm!("out dx, al", in("dx") IER, in("al") 0u8, options(nomem, preserves_flags));
+            // Enable DLAB
+            core::arch::asm!("out dx, al", in("dx") LCR, in("al") 0x80u8, options(nomem, preserves_flags));
+            // Set baud to 115200 (divisor = 1)
+            core::arch::asm!("out dx, al", in("dx") DATA_REG, in("al") 0x01u8, options(nomem, preserves_flags)); // DLL
+            core::arch::asm!("out dx, al", in("dx") IER, in("al") 0x00u8, options(nomem, preserves_flags));     // DLM
+            // 8N1, clear DLAB
+            core::arch::asm!("out dx, al", in("dx") LCR, in("al") 0x03u8, options(nomem, preserves_flags));
+            // Enable FIFO, clear, 14-byte threshold
+            core::arch::asm!("out dx, al", in("dx") FCR, in("al") 0xC7u8, options(nomem, preserves_flags));
+            // RTS/DSR set, OUT2 set
+            core::arch::asm!("out dx, al", in("dx") MCR, in("al") 0x0Bu8, options(nomem, preserves_flags));
+        }
+    }
+
+    // Helper to write a string
+    fn write_str(s: &str) {
+        for b in s.bytes() { write_byte(b); }
+    }
+
+    // Initialize COM1 then print a prompt
+    serial_init();
+    write_str("\r\n> ");
+
     let mut line = String::new();
 
     loop {
@@ -229,6 +261,7 @@ async fn x86_serial_console() {
                     if !line.is_empty() {
                         eval(&line);
                         line.clear();
+                        write_str("> ");
                     }
                 }
                 '\x7F' | '\x08' => {
@@ -248,6 +281,7 @@ async fn x86_serial_console() {
                     write_byte(b'\r');
                     write_byte(b'\n');
                     line.clear();
+                    write_str("> ");
                 }
                 ch if ch.is_ascii() && !ch.is_control() => {
                     line.push(ch);
