@@ -278,6 +278,13 @@ pub unsafe fn handoff_to_kernel(cpuid: usize, boot_ticks: u64, init: &GlobalInit
     init.barrier.wait();
 
     unsafe {
+        // Emit a raw serial marker before entering the kernel to confirm control leaves the loader
+        core::arch::asm!(
+            "mov dx, 0x3F8\n\
+             mov al, 0x4C\n\
+             out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
         asm! {
             // Set up stack first
             "mov rsp, {stack_top}",

@@ -87,6 +87,51 @@ impl Kernel<'static> {
 }
 
 impl Kernel<'_> {
+    pub fn raw_bytes(&self) -> &'static [u8] {
+        unsafe { slice::from_raw_parts(INLINED_KERNEL_BYTES.0.as_ptr(), INLINED_KERNEL_BYTES.0.len()) }
+    }
+    /// Find the virtual address (or image-relative address) of a symbol by name using the `.symtab`.
+    pub fn find_symbol_addr(&self, name: &str) -> Option<usize> {
+        // Locate the symbol and string tables
+        let symtab = self.elf_file.find_section_by_name(".symtab")?;
+        let strtab = self.elf_file.find_section_by_name(".strtab")?;
+
+        let syms = symtab.raw_data(&self.elf_file);
+        let strs = strtab.raw_data(&self.elf_file);
+
+        // ELF64 symbol entry size is 24 bytes
+        let entsize = symtab.entry_size() as usize;
+        if entsize == 0 { return None; }
+        let count = syms.len() / entsize;
+
+        let mut i = 0;
+        while i < count {
+            let off = i * entsize;
+            // struct Elf64_Sym { st_name: u32, st_info: u8, st_other: u8, st_shndx: u16, st_value: u64, st_size: u64 }
+            if syms.len() < off + entsize { break; }
+            let st_name = u32::from_le_bytes([syms[off], syms[off+1], syms[off+2], syms[off+3]]) as usize;
+            // skip info/other/shndx
+            let st_value = u64::from_le_bytes([
+                syms[off+8], syms[off+9], syms[off+10], syms[off+11], syms[off+12], syms[off+13], syms[off+14], syms[off+15]
+            ]) as usize;
+
+            // Lookup symbol name in .strtab
+            if st_name < strs.len() {
+                // Read C string
+                let mut end = st_name;
+                while end < strs.len() && strs[end] != 0 { end += 1; }
+                if let Ok(sym_name) = core::str::from_utf8(&strs[st_name..end]) {
+                    if sym_name == name {
+                        return Some(st_value);
+                    }
+                }
+            }
+
+            i += 1;
+        }
+
+        None
+    }
     pub fn phys_range(&self) -> Range<usize> {
         let fdt = INLINED_KERNEL_BYTES.0.as_ptr_range();
         Range::from(fdt.start as usize..fdt.end as usize)

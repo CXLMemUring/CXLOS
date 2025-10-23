@@ -188,18 +188,7 @@ cfg_if::cfg_if! {
         impl SerialStream {
             const COM1: u16 = 0x3F8;
 
-    fn new() -> Self {
-            // debug: 's' SerialStream::new
-            unsafe {
-                core::arch::asm!(
-                    "mov dx, 0x3F8\n\
-                     mov al, 0x73\n\
-                     out dx, al",
-                    options(nomem, nostack, preserves_flags)
-                );
-            }
-            Self { port: Self::COM1 }
-        }
+            fn new() -> Self { Self { port: Self::COM1 } }
 
             #[inline]
             fn write_byte(&mut self, byte: u8) {

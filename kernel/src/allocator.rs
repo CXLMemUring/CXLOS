@@ -58,61 +58,23 @@ unsafe impl GlobalAlloc for KernelAllocator {
 static GLOBAL_ALLOCATOR: KernelAllocator = KernelAllocator;
 
 pub fn init(boot_alloc: &mut BootstrapAllocator, boot_info: &BootInfo) {
-    // debug: 'C' entering allocator::init
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        core::arch::asm!(
-            "mov dx, 0x3F8\n\
-             mov al, 0x43\n\
-             out dx, al",
-            options(nostack, preserves_flags)
-        );
-    }
+    // allocator::init
     let layout =
         Layout::from_size_align(INITIAL_HEAP_SIZE_PAGES * arch::PAGE_SIZE, arch::PAGE_SIZE)
             .unwrap();
 
     let phys = boot_alloc.allocate_contiguous(layout).unwrap();
-    // debug: 'H' after allocate_contiguous
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        core::arch::asm!(
-            "mov dx, 0x3F8\n\
-             mov al, 0x48\n\
-             out dx, al",
-            options(nostack, preserves_flags)
-        );
-    }
+    // after allocate_contiguous
 
     let virt = {
         // Force heap mapping into kernel higher half using arch constant base
         let base = arch::KERNEL_ASPACE_RANGE.start.get();
         let start = base.checked_add(phys.get()).unwrap();
         #[cfg(target_arch = "x86_64")]
-        unsafe {
-            serial_out(b'B');
-            print_u64_hex(base as u64);
-            serial_out(b'S');
-            print_u64_hex(start as u64);
-        }
+        { let _ = base; let _ = start; }
         Range::from(start..start.checked_add(layout.size()).unwrap())
     };
-    // debug: print phys map range and addresses
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        serial_out(b'M');
-        serial_out(b's');
-        print_u64_hex(boot_info.physical_memory_map.start as u64);
-        serial_out(b'e');
-        print_u64_hex(boot_info.physical_memory_map.end as u64);
-        serial_out(b'v');
-        print_u64_hex(virt.start as u64);
-        serial_out(b'p');
-        print_u64_hex(phys.get() as u64);
-        serial_out(b'l');
-        print_u64_hex(layout.size() as u64);
-        serial_out(b'V');
-    }
+    // silent
     // Build initial heap span
     let span = Span::from_base_size(
         virt.start as *mut u8,
@@ -121,57 +83,34 @@ pub fn init(boot_alloc: &mut BootstrapAllocator, boot_info: &BootInfo) {
 
     // Sanity-check span mapping: touch first 64 bytes
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        serial_out(b'w');
-        core::ptr::write_bytes(virt.start as *mut u8, 0, 64);
-        serial_out(b'W');
-    }
+    unsafe { core::ptr::write_bytes(virt.start as *mut u8, 0, 64); }
 
     // Safety: just allocated the memory region
     unsafe {
         // Initialize Talc instance in aligned storage and configure span
         // debug: 'T' before TALC_STORAGE write
-        #[cfg(target_arch = "x86_64")]
-        serial_out(b'T');
         TALC_STORAGE
             .0
             .as_mut_ptr()
             .write(Talc::new(ErrOnOom).lock());
-        #[cfg(target_arch = "x86_64")]
-        serial_out(b't');
+        
         // Instance is available; we avoid allocations until span configured below
         let talc = &*TALC_STORAGE.0.as_ptr();
         // debug: 'l' before lock
-        #[cfg(target_arch = "x86_64")]
-        serial_out(b'l');
         let mut guard = talc.lock();
-        // debug: 'L' after lock
-        #[cfg(target_arch = "x86_64")]
-        serial_out(b'L');
+        
         let old_heap = guard.claim(span).unwrap();
-        // debug: 'j' after claim
-        #[cfg(target_arch = "x86_64")]
-        serial_out(b'j');
         guard.extend(old_heap, span);
-        // debug: 'k' after extend
-        #[cfg(target_arch = "x86_64")]
-        serial_out(b'k');
+        
         // Heap configured
-        #[cfg(target_arch = "x86_64")]
-        serial_out(b'r');
-        #[cfg(target_arch = "x86_64")]
-        serial_out(b'R');
+        
     }
 
     // FIXME: Skip tracing::debug on x86_64 as it may hang
     #[cfg(not(target_arch = "x86_64"))]
     tracing::debug!("Kernel Heap: {virt:#x?}");
 
-    // debug: 'Z' leaving allocator::init
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        serial_out(b'Z');
-    }
+    // leaving allocator::init
 }
 
 #[cfg(target_arch = "x86_64")]

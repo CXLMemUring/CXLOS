@@ -3,6 +3,10 @@
 
 .section .text
 _start:
+    # Raw serial 'R' on COM1
+    mov $0x3F8, %dx
+    mov $0x52, %al
+    out %al, %dx
     # The loader passes:
     # rdi = cpuid
     # rsi = boot_info  

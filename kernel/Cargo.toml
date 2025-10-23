@@ -67,7 +67,7 @@ riscv.workspace = true
 x86.workspace = true
 
 [build-dependencies]
-vergen-git2 = { version = "1.0.7", features = ["build", "cargo", "rustc"] }
+vergen = { version = "9.0.6", features = ["build", "cargo", "rustc"] }
 cc = "1.0"
 
 [lints]

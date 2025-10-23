@@ -33,8 +33,12 @@ pub const STACK_ALIGNMENT: usize = 16;
 /// Global x86_64 specific initialization.
 #[cold]
 pub fn init() -> state::Global {
+    #[cfg(target_arch = "x86_64")]
+    unsafe { crate::serial_out(b'{'); }
     mem::init();
     asid_allocator::init();
+    #[cfg(target_arch = "x86_64")]
+    unsafe { crate::serial_out(b'}'); }
 
     state::Global {}
 }
@@ -47,13 +51,6 @@ pub fn init() -> state::Global {
 #[cold]
 pub fn per_cpu_init_early() {
     unsafe {
-        // Debug checkpoint: 'S' entering per_cpu_init_early
-        core::arch::asm!(
-            "mov dx, 0x3F8\n\
-             mov al, 0x53\n\
-             out dx, al",
-            options(nomem, nostack, preserves_flags)
-        );
         // Ensure FPU/SSE are usable before issuing any FPU instruction.
         // Set CR0.MP, clear CR0.EM and CR0.TS.
         core::arch::asm!(
@@ -98,13 +95,6 @@ pub fn per_cpu_init_early() {
             out("rax") _,
         );
 
-        // Debug checkpoint: 's' leaving per_cpu_init_early
-        core::arch::asm!(
-            "mov dx, 0x3F8\n\
-             mov al, 0x73\n\
-             out dx, al",
-            options(nomem, nostack, preserves_flags)
-        );
     }
 }
 

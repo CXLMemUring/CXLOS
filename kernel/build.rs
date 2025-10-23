@@ -7,7 +7,7 @@
 
 use std::env;
 
-use vergen_git2::{BuildBuilder, CargoBuilder, Emitter, Git2Builder, RustcBuilder};
+use vergen::{BuildBuilder, CargoBuilder, Emitter, RustcBuilder};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // For x86_64, compile the assembly entry point
@@ -17,6 +17,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cc::Build::new()
             .file("src/arch/x86_64/entry.s")
             .compile("entry");
+        // Ensure the linker uses the assembly `_start` symbol as the entry point.
+        // Pass `-e _start` directly to the gnu-lld linker.
+        println!("cargo:rustc-link-arg=-e");
+        println!("cargo:rustc-link-arg=_start");
     }
 
     let build = BuildBuilder::default().build_timestamp(true).build()?;
@@ -25,16 +29,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .opt_level(true)
         .build()?;
     let rustc = RustcBuilder::default().semver(true).channel(true).build()?;
-    let git = Git2Builder::default()
-        .sha(true)
-        .commit_timestamp(true)
-        .branch(true)
-        .build()?;
 
-    Emitter::default()
+    Emitter::new()
         .add_instructions(&build)?
         .add_instructions(&cargo)?
-        .add_instructions(&git)?
+        // Git metadata intentionally omitted to avoid libgit2 dependency in constrained builds
         .add_instructions(&rustc)?
         .emit()?;
 

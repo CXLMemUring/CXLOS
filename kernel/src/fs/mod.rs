@@ -27,11 +27,7 @@ static VFS: RwLock<Option<VirtualFileSystem>> = RwLock::new(None);
 
 /// Initialize the filesystem
 pub fn init() -> crate::Result<()> {
-    // probe: 'S' entering fs::init
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        serial_out(b'S');
-    }
+    // entering fs::init
 
     let mut vfs_guard = VFS.write();
     let mut vfs = VirtualFileSystem::new();
@@ -46,11 +42,7 @@ pub fn init() -> crate::Result<()> {
     vfs.mkdir("/tmp")?;
     vfs.mkdir("/usr")?;
     vfs.mkdir("/var")?;
-    // probe: 'M' after mkdirs
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        serial_out(b'M');
-    }
+    // after mkdirs
 
     // Create some basic files
     vfs.create_file("/etc/hostname", b"k23\n")?;
@@ -58,17 +50,9 @@ pub fn init() -> crate::Result<()> {
     vfs.create_file("/etc/group", b"root:x:0:root\n")?;
     vfs.create_file("/proc/version", b"k23 version 0.1.0\n")?;
     vfs.create_file("/proc/cmdline", b"console=ttyS0\n")?;
-    // probe: 'C' after create_file batch
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        serial_out(b'C');
-    }
+    // after create_file batch
     *vfs_guard = Some(vfs);
-    // probe: 's' stored VFS
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        serial_out(b's');
-    }
+    // stored VFS
     Ok(())
 }
 

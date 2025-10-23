@@ -308,33 +308,73 @@ fn do_global_init(hartid: usize, opaque: *const c_void) -> GlobalInitResult {
     let elf_entry_raw = kernel.elf_file.header.pt2.entry_point();
     log::debug!("Raw ELF entry point from header: {:#x}", elf_entry_raw);
 
-    let elf_entry = usize::try_from(elf_entry_raw).unwrap();
+    let mut kernel_entry = None;
+    // Attempt to find a reliable entry symbol first.
+    for sym in ["_rust_start", "_start"].iter() {
+        if let Some(st_value) = kernel.find_symbol_addr(sym) {
+            let entry = if st_value >= arch::KERNEL_ASPACE_BASE {
+                st_value
+            } else {
+                kernel_virt.start.checked_add(st_value).unwrap()
+            };
+            log::warn!("Using symbol {} at {:#x} => entry {:#x}", sym, st_value, entry);
+            kernel_entry = Some(entry);
+            break;
+        }
+    }
 
-    // Sanity check: if entry point seems invalid (too small or in data section),
-    // use the start of .text section instead
-    let kernel_entry = if elf_entry < 0x1000 {
-        // Entry point is in ELF header area, clearly wrong
-        // Use .text section start instead (0x301400 based on the section dump)
-        let text_start = 0x301400usize;
-        log::warn!(
-            "ELF entry {:#x} is invalid (in header area), using .text start {:#x}",
-            elf_entry,
-            text_start
-        );
-        kernel_virt.start.checked_add(text_start).unwrap()
-    } else if elf_entry >= arch::KERNEL_ASPACE_BASE {
-        log::warn!(
-            "ELF entry {:#x} is already a high canonical address, using directly",
-            elf_entry
-        );
-        elf_entry
+    let kernel_entry = if let Some(entry) = kernel_entry {
+        entry
     } else {
-        log::debug!(
-            "ELF entry {:#x} is an offset, adding to kernel_virt.start {:#x}",
-            elf_entry,
-            kernel_virt.start
-        );
-        kernel_virt.start.checked_add(elf_entry).unwrap()
+        // Try to locate the known assembly entry stub by signature in file bytes
+        let bytes = kernel.raw_bytes();
+        const SIG: [u8; 8] = [0x48, 0x83, 0xE4, 0xF0, 0x48, 0x83, 0xEC, 0x08];
+        let mut found = None;
+        let len = bytes.len();
+        let mut i = 0usize;
+        while i + 16 <= len {
+            // Match prefix
+            if &bytes[i..i + 8] == &SIG {
+                // Check suffix matches 0x0F 0x0B (UD2) at positions 14..16
+                if bytes[i + 14] == 0x0F && bytes[i + 15] == 0x0B {
+                    found = Some(i);
+                    break;
+                }
+            }
+            i += 1;
+        }
+
+        if let Some(file_off) = found {
+            // Translate file offset to virtual address via LOAD segments
+            let mut vaddr = None;
+            for ph in kernel.elf_file.program_iter() {
+                let off = usize::try_from(ph.offset()).unwrap_or(usize::MAX);
+                let filesz = usize::try_from(ph.file_size()).unwrap_or(0);
+                if filesz == 0 { continue; }
+                if file_off >= off && file_off < off + filesz {
+                    let base = usize::try_from(ph.virtual_addr()).unwrap_or(0);
+                    vaddr = Some(base + (file_off - off));
+                    break;
+                }
+            }
+            if let Some(base_va) = vaddr {
+                let entry = if base_va >= arch::KERNEL_ASPACE_BASE {
+                    base_va
+                } else {
+                    kernel_virt.start.checked_add(base_va).unwrap()
+                };
+                log::warn!("Using asm signature at file off {:#x} => VA {:#x}", file_off, entry);
+                entry
+            } else {
+                // As last resort, fall back to e_entry + image base
+                let elf_entry = usize::try_from(elf_entry_raw).unwrap();
+                if elf_entry >= arch::KERNEL_ASPACE_BASE { elf_entry } else { kernel_virt.start.checked_add(elf_entry).unwrap() }
+            }
+        } else {
+            // Fallback: treat e_entry as an offset if it’s below KERNEL_ASPACE_BASE
+            let elf_entry = usize::try_from(elf_entry_raw).unwrap();
+            if elf_entry >= arch::KERNEL_ASPACE_BASE { elf_entry } else { kernel_virt.start.checked_add(elf_entry).unwrap() }
+        }
     };
     log::debug!("Final chosen entry {:#x}", kernel_entry);
 

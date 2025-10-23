@@ -16,6 +16,7 @@ const S: &str = r#"
 "#;
 
 use alloc::string::{String, ToString};
+use alloc::format;
 use core::fmt;
 use core::fmt::Write;
 use core::ops::DerefMut;
@@ -39,11 +40,24 @@ pub fn init(devtree: &'static DeviceTree, sched: &'static Executor, num_cpus: us
     // out of the way before dropping the user into the kernel shell. If we don't
     // wait for the last CPU to have finished initializing it will mess up the shell output.
     static SYNC: OnceLock<Barrier> = OnceLock::new();
-    let barrier = SYNC.get_or_init(|| Barrier::new(num_cpus));
+    let n = core::cmp::max(num_cpus, 1);
+    let barrier = SYNC.get_or_init(|| Barrier::new(n));
 
     if barrier.wait().is_leader() {
-        tracing::info!("{S}");
-        tracing::info!("type `help` to list available commands");
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            // Print banner directly to serial as a fallback
+            crate::serial_out(b'\r'); crate::serial_out(b'\n');
+            for &b in S.as_bytes() { crate::serial_out(b); }
+            crate::serial_out(b'\r'); crate::serial_out(b'\n');
+            let hint = b"type `help` to list available commands\r\n";
+            for &b in hint { crate::serial_out(b); }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            tracing::info!("{S}");
+            tracing::info!("type `help` to list available commands (cpus={n})");
+        }
 
         #[cfg(target_arch = "x86_64")]
         {
@@ -328,19 +342,21 @@ const VERSION: Command = Command::new("version")
     .with_help("print verbose build and version info.")
     .with_fn(|_| {
         tracing::info!("k23 v{}", env!("CARGO_PKG_VERSION"));
-        tracing::info!(build.version = %concat!(
+        let git_branch = option_env!("VERGEN_GIT_BRANCH").unwrap_or("unknown");
+        let git_sha = option_env!("VERGEN_GIT_SHA").unwrap_or("unknown");
+        tracing::info!(build.version = %format!(
+            "{}-{}.{}",
             env!("CARGO_PKG_VERSION"),
-            "-",
-            env!("VERGEN_GIT_BRANCH"),
-            ".",
-            env!("VERGEN_GIT_SHA")
+            git_branch,
+            git_sha
         ));
         tracing::info!(build.timestamp = %env!("VERGEN_BUILD_TIMESTAMP"));
         tracing::info!(build.opt_level = %env!("VERGEN_CARGO_OPT_LEVEL"));
         tracing::info!(build.target = %env!("VERGEN_CARGO_TARGET_TRIPLE"));
-        tracing::info!(commit.sha = %env!("VERGEN_GIT_SHA"));
-        tracing::info!(commit.branch = %env!("VERGEN_GIT_BRANCH"));
-        tracing::info!(commit.date = %env!("VERGEN_GIT_COMMIT_TIMESTAMP"));
+        let git_commit_ts = option_env!("VERGEN_GIT_COMMIT_TIMESTAMP").unwrap_or("unknown");
+        tracing::info!(commit.sha = %git_sha);
+        tracing::info!(commit.branch = %git_branch);
+        tracing::info!(commit.date = %git_commit_ts);
         tracing::info!(rustc.version = %env!("VERGEN_RUSTC_SEMVER"));
         tracing::info!(rustc.channel = %env!("VERGEN_RUSTC_CHANNEL"));
 
