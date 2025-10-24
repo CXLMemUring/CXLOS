@@ -104,10 +104,27 @@ pub fn per_cpu_init_early() {
 #[cold]
 pub fn per_cpu_init_late(devtree: &DeviceTree, cpuid: usize) -> crate::Result<state::CpuLocal> {
     // Initialize the trap handler
+    #[cfg(target_arch = "x86_64")]
+    unsafe { crate::serial_out(b'P'); }
     trap_handler::init();
+    #[cfg(target_arch = "x86_64")]
+    unsafe { crate::serial_out(b'Q'); }
 
     Ok(state::CpuLocal {
         cpu: Cpu::new(devtree, cpuid)?,
+    })
+}
+
+/// x86_64 variant that does not require a device tree reference.
+#[cfg(target_arch = "x86_64")]
+pub fn per_cpu_init_late_no_dt(cpuid: usize) -> crate::Result<state::CpuLocal> {
+    // Initialize the trap handler
+    unsafe { crate::serial_out(b'P'); }
+    trap_handler::init();
+    unsafe { crate::serial_out(b'Q'); }
+
+    Ok(state::CpuLocal {
+        cpu: Cpu::new_without_dt(cpuid)?,
     })
 }
 

@@ -57,7 +57,7 @@ use fastrand::FastRand;
 use kasync::executor::{Executor, Worker};
 use kasync::time::{Instant, Ticks, Timer};
 use loader_api::{BootInfo, LoaderConfig, MemoryRegionKind};
-use mem::{PhysicalAddress, frame_alloc};
+use mem::{PhysicalAddress, frame_alloc, AddressRangeExt};
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
@@ -337,8 +337,11 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         unsafe { serial_out(b'^'); }
 
         // FAST PATH (x86_64): run a blocking serial console directly to ensure input works
+        // Gate behind a const so we can disable when it interferes.
         #[cfg(target_arch = "x86_64")]
         {
+            const FAST_PATH: bool = false;
+            if FAST_PATH {
             // Minimal COM1 init
             const COM1_BASE: u16 = 0x3F8;
             const DATA_REG: u16 = COM1_BASE + 0;
@@ -388,95 +391,118 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
                 }
             }
 
-            use alloc::string::String;
-            puts("\r\n> ");
-            let mut line = String::new();
-            loop {
-                if let Some(b) = getb() {
-                    match b as char {
-                        '\r' | '\n' => {
-                            putb(b'\r'); putb(b'\n');
-                            if !line.is_empty() {
-                                crate::shell::eval(&line);
-                                line.clear();
+                use alloc::string::String;
+
+                // Print a simple banner and hint (mirrors shell::init fallback)
+                puts("\r\n");
+                puts(crate::shell::S);
+                puts("\r\n");
+                puts("type `help` to list available commands\r\n");
+                puts("> ");
+                let mut line = String::new();
+                loop {
+                    if let Some(b) = getb() {
+                        match b as char {
+                            '\r' | '\n' => {
+                                putb(b'\r'); putb(b'\n');
+                                if !line.is_empty() {
+                                    // Mark eval begin/end to debug potential hangs
+                                    putb(b'!');
+                                    crate::shell::eval(&line);
+                                    putb(b'?');
+                                    line.clear();
+                                }
+                                puts("> ");
                             }
-                            puts("> ");
-                        }
-                        '\x7F' | '\x08' => {
-                            if !line.is_empty() {
-                                line.pop();
-                                putb(b'\x08'); putb(b' '); putb(b'\x08');
+                            '\x7F' | '\x08' => {
+                                if !line.is_empty() {
+                                    line.pop();
+                                    putb(b'\x08'); putb(b' '); putb(b'\x08');
+                                }
                             }
+                            c if c.is_ascii() && !c.is_control() => {
+                                line.push(c);
+                                putb(b as u8);
+                            }
+                            _ => {}
                         }
-                        c if c.is_ascii() && !c.is_control() => {
-                            line.push(c);
-                            putb(b as u8);
-                        }
-                        _ => {}
                     }
                 }
             }
         }
 
-        // initialize the global frame allocator
-        // at this point we have parsed and processed the flattened device tree, so we pass it to the
-        // frame allocator for reuse
-        let frame_alloc = frame_alloc::init(boot_alloc, fdt_region_phys);
+        // x86_64: optionally skip heavy memory/fs init to reach shell quickly
         #[cfg(target_arch = "x86_64")]
-        unsafe { serial_out(b'~'); }
+        const SKIP_MEM_INIT: bool = false;
 
-        // initialize the virtual memory subsystem
-        mem::init(boot_info, &mut rng, frame_alloc).unwrap();
         #[cfg(target_arch = "x86_64")]
-        unsafe { serial_out(b'#'); }
-        // after mem::init
+        if !SKIP_MEM_INIT {
+            // initialize the global frame allocator
+            let frame_alloc = frame_alloc::init(boot_alloc, fdt_region_phys);
+            unsafe { serial_out(b'~'); }
 
-        // initialize the filesystem
-        // probe: 'I' before fs::init
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            serial_out(b'I');
+            // initialize the virtual memory subsystem
+            mem::init(boot_info, &mut rng, frame_alloc).unwrap();
+            unsafe { serial_out(b'#'); }
+
+            // initialize the filesystem
+            unsafe { serial_out(b'I'); }
+            unsafe { serial_out(b'.'); }
+            fs::init().unwrap();
+            unsafe { serial_out(b'@'); }
         }
-        #[cfg(target_arch = "x86_64")]
-        unsafe { serial_out(b'.'); }
-        fs::init().unwrap();
-        // checkpoint: 'i' after fs::init
-        #[cfg(target_arch = "x86_64")]
-        unsafe { serial_out(b'@'); }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            // initialize the global frame allocator
+            let frame_alloc = frame_alloc::init(boot_alloc, fdt_region_phys);
+            // initialize the virtual memory subsystem
+            mem::init(boot_info, &mut rng, frame_alloc).unwrap();
+            // initialize the filesystem
+            fs::init().unwrap();
+        }
 
         // Optionally initialize WASM BusyBox (requires prebuilt wasm + feature flag)
-        if let Ok(true) = busybox::wasm_loader::try_init_wasm_busybox() {
-            tracing::info!("Initialized WASM BusyBox module");
-        } else {
-            tracing::warn!("WASM BusyBox module not initialized");
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            if let Ok(true) = busybox::wasm_loader::try_init_wasm_busybox() {
+                tracing::info!("Initialized WASM BusyBox module");
+            } else {
+                tracing::warn!("WASM BusyBox module not initialized");
+            }
         }
+        // x86_64: skip WASM BusyBox initialization entirely for now
         #[cfg(target_arch = "x86_64")]
         unsafe { serial_out(b'&'); }
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'z'); }
 
         // perform LATE per-cpu, architecture-specific initialization
         // (e.g. setting the trap vector and enabling interrupts)
         #[cfg(target_arch = "x86_64")]
         let cpu = {
-            // x86_64: Create a fake device tree just to satisfy the API
-            // The x86_64 Cpu::new doesn't actually use it
-            use device_tree::DeviceTree;
-
-            // This is a horrible hack but necessary because DeviceTree uses ouroboros
-            // and can't be easily created without Bump allocator
-            // Since x86_64 Cpu::new ignores the device tree parameter anyway, we can pass garbage
-            let fake_dt_ptr = 0x1234usize as *const DeviceTree;
-            let fake_dt = unsafe { &*fake_dt_ptr };
-
-            // This will work because x86_64 Cpu::new never dereferences the device tree
-            arch::device::cpu::Cpu::new(fake_dt, cpuid)?
+            // breadcrumb before Cpu::new
+            unsafe { serial_out(b'0'); }
+            // Instrument non-fast-path to locate hangs
+            unsafe { serial_out(b'1'); }
+            let cpu = arch::device::cpu::Cpu::new_without_dt(cpuid)?;
+            unsafe { serial_out(b'2'); }
+            cpu
         };
 
         #[cfg(not(target_arch = "x86_64"))]
         let cpu = arch::device::cpu::Cpu::new(&device_tree, cpuid)?;
 
+        unsafe { serial_out(b'3'); }
+        #[cfg(target_arch = "x86_64")]
+        let executor = Executor::with_capacity(1).unwrap();
+        #[cfg(not(target_arch = "x86_64"))]
         let executor = Executor::with_capacity(boot_info.cpu_mask.count_ones() as usize).unwrap();
+        unsafe { serial_out(b'4'); }
         let timer = Timer::new(Duration::from_millis(1), cpu.clock);
+        unsafe { serial_out(b'5'); }
 
+        unsafe { serial_out(b'6'); }
         Ok(Global {
             time_origin: Instant::from_ticks(&timer, Ticks(boot_ticks)),
             timer,
@@ -521,12 +547,7 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
 
     #[cfg(target_arch = "x86_64")]
     let arch_state = {
-        // x86_64 per_cpu_init_late doesn't actually use device tree
-        // Create a fake reference like before
-        let fake_dt_ptr = 0x1234usize as *const DeviceTree;
-        let fake_dt = unsafe { &*fake_dt_ptr };
-        let st = arch::per_cpu_init_late(fake_dt, cpuid).unwrap();
-        #[cfg(target_arch = "x86_64")]
+        let st = arch::per_cpu_init_late_no_dt(cpuid).unwrap();
         unsafe { serial_out(b'%'); }
         st
     };
@@ -536,13 +557,18 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         arch: arch_state,
     });
 
+    #[cfg(not(target_arch = "x86_64"))]
     tracing::info!(
         "Booted in ~{:?} ({:?} in k23)",
         Instant::now(&global.timer).duration_since(Instant::ZERO),
         Instant::from_ticks(&global.timer, Ticks(boot_ticks)).elapsed(&global.timer)
     );
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'B'); }
 
     let mut worker2 = Worker::new(&global.executor, FastRand::from_seed(rng.next_u64())).unwrap();
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'W'); }
 
     cfg_if! {
         if #[cfg(test)] {
@@ -561,18 +587,9 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
 
             #[cfg(target_arch = "x86_64")]
             {
-                // x86_64: shell::init doesn't actually use device tree
-                // Create a fake reference like before
-                let fake_dt_ptr = 0x1234usize as *const DeviceTree;
-                let fake_dt = unsafe { &*fake_dt_ptr };
                 // debug: entering shell::init
-                #[cfg(target_arch = "x86_64")]
                 unsafe { serial_out(b'>'); }
-                shell::init(
-                    fake_dt,
-                    &global.executor,
-                    boot_info.cpu_mask.count_ones() as usize,
-                );
+                shell::init_x86(&global.executor, 1);
             }
             arch::block_on(worker2.run(futures::future::pending::<()>())).unwrap_err(); // the only way `run` can return is when the executor is closed
         }
@@ -585,7 +602,17 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
 /// sorted and might not be optimally "packed". This function will both sort regions and
 /// attempt to compact the list by merging adjacent regions.
 fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAddress>, 16> {
-    let temp: ArrayVec<Range<PhysicalAddress>, 16> = boot_info
+    // On x86_64, restrict usable regions to the portion of physical memory that
+    // is already covered by the loader-provided physmap to avoid early page faults
+    // when touching bookkeeping pages before VM is fully initialized.
+    #[cfg(target_arch = "x86_64")]
+    let physmap_size = boot_info
+        .physical_memory_map
+        .end
+        .checked_sub(boot_info.physical_memory_map.start)
+        .unwrap();
+
+    let mut temp: ArrayVec<Range<PhysicalAddress>, 16> = boot_info
         .memory_regions
         .iter()
         .filter_map(|region| {
@@ -593,8 +620,19 @@ fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAd
                 return None;
             }
 
-            let start = PhysicalAddress::new(region.range.start);
-            let end = PhysicalAddress::new(region.range.end);
+            let mut start = PhysicalAddress::new(region.range.start);
+            let mut end = PhysicalAddress::new(region.range.end);
+
+            #[cfg(target_arch = "x86_64")]
+            {
+                // Clamp to physmap [0, physmap_size)
+                if start.get() >= physmap_size {
+                    return None;
+                }
+                if end.get() > physmap_size {
+                    end = PhysicalAddress::new(physmap_size);
+                }
+            }
 
             // Round boundaries to page granularity to keep bootstrap allocations aligned.
             let aligned_start = match start.checked_align_up(arch::PAGE_SIZE) {
@@ -610,6 +648,28 @@ fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAd
             Some(Range::from(aligned_start..aligned_end))
         })
         .collect();
+
+    // x86_64: prefer simplicity for early bring-up. Use only the single largest
+    // contiguous usable region (already clamped to the physmap) to avoid
+    // complex merging that may touch unmapped bookkeeping.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if !temp.is_empty() {
+            let mut max_idx = 0usize;
+            let mut max_size = 0usize;
+            for (i, r) in temp.iter().enumerate() {
+                let sz = r.size();
+                if sz > max_size {
+                    max_size = sz;
+                    max_idx = i;
+                }
+            }
+            // Keep only the largest region
+            let keep = temp[max_idx];
+            temp.clear();
+            temp.push(keep);
+        }
+    }
 
     // merge adjacent regions
     let mut out: ArrayVec<Range<PhysicalAddress>, 16> = ArrayVec::new();

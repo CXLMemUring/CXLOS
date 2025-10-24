@@ -57,6 +57,8 @@ impl fmt::Debug for Arena {
 
 impl Arena {
     pub fn from_selection(selection: ArenaSelection) -> Self {
+        #[cfg(target_arch = "x86_64")]
+        unsafe { crate::serial_out(b'A'); }
         debug_assert!(selection.bookkeeping.size() >= bookkeeping_size(selection.arena.size()));
 
         // Safety: arena selection has ensured the region is valid
@@ -71,14 +73,20 @@ impl Arena {
                 selection.bookkeeping.size() / ARENA_PAGE_BOOKKEEPING_SIZE,
             )
         };
+        #[cfg(target_arch = "x86_64")]
+        unsafe { crate::serial_out(b'B'); }
 
         let mut remaining_bytes = selection.arena.size();
         let mut addr = selection.arena.start;
         let mut total_frames = 0;
         let mut max_order = 0;
         let mut free_lists = [const { List::new() }; MAX_ORDER];
+        #[cfg(target_arch = "x86_64")]
+        unsafe { crate::serial_out(b'C'); }
 
         while remaining_bytes > 0 {
+            #[cfg(target_arch = "x86_64")]
+            unsafe { crate::serial_out(b'D'); }
             let max_align = addr.get() & (!addr.get() + 1);
             let max_size = prev_power_of_two(remaining_bytes);
 
@@ -96,9 +104,12 @@ impl Arena {
                 debug_assert!(addr.is_aligned_to(arch::PAGE_SIZE));
                 let offset = addr.checked_sub_addr(selection.arena.start).unwrap();
                 let idx = offset / arch::PAGE_SIZE;
-
+                #[cfg(target_arch = "x86_64")]
+                unsafe { crate::serial_out(b'E'); }
                 let frame = slots[idx].write(FrameInfo::new(addr)).into();
                 free_lists[order].push_back(frame);
+                #[cfg(target_arch = "x86_64")]
+                unsafe { crate::serial_out(b'F'); }
             }
 
             addr = addr.checked_add(size).unwrap();
@@ -107,6 +118,8 @@ impl Arena {
 
         // Make sure we've accounted for all frames
         debug_assert_eq!(total_frames, selection.arena.size() / arch::PAGE_SIZE);
+        #[cfg(target_arch = "x86_64")]
+        unsafe { crate::serial_out(b'G'); }
 
         Self {
             range: selection.arena,
@@ -244,12 +257,20 @@ impl FallibleIterator for ArenaSelections {
     type Error = SelectionError;
 
     fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
+        #[cfg(target_arch = "x86_64")]
+        unsafe { crate::serial_out(b'1'); }
         while let Some(mut arena) = self.free_regions.pop() {
+            #[cfg(target_arch = "x86_64")]
+            unsafe { crate::serial_out(b'2'); }
             while let Some(region) = self.free_regions.pop() {
+                #[cfg(target_arch = "x86_64")]
+                unsafe { crate::serial_out(b'3'); }
+                #[cfg(target_arch = "x86_64")]
+                unsafe { crate::serial_out(b'a'); }
+                #[cfg(not(target_arch = "x86_64"))]
                 tracing::debug!(arena.end=?arena.end,region=?region, "Attempting to add free region");
 
                 debug_assert!(!arena.is_overlapping(&region));
-
                 let pages_in_hole = if arena.end <= region.start {
                     // the region is higher than the current arena
                     region.start.checked_sub_addr(arena.end).unwrap() / arch::PAGE_SIZE
@@ -258,12 +279,17 @@ impl FallibleIterator for ArenaSelections {
                     // the region is lower than the current arena
                     arena.start.checked_sub_addr(region.end).unwrap() / arch::PAGE_SIZE
                 };
-
+                #[cfg(target_arch = "x86_64")]
+                unsafe { crate::serial_out(b'b'); }
                 let waste_from_hole = ARENA_PAGE_BOOKKEEPING_SIZE * pages_in_hole;
-
+                #[cfg(target_arch = "x86_64")]
+                unsafe { crate::serial_out(b'c'); }
                 if self.wasted_bytes + waste_from_hole > MAX_WASTED_ARENA_BYTES {
+                    #[cfg(not(target_arch = "x86_64"))]
                     tracing::trace!("waste from hole exceeded limits");
                     self.free_regions.push(region);
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe { crate::serial_out(b'h'); }
                     break;
                 } else {
                     self.wasted_bytes += waste_from_hole;
@@ -273,14 +299,21 @@ impl FallibleIterator for ArenaSelections {
                     } else {
                         arena.start = region.start;
                     }
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe { crate::serial_out(b'm'); }
                 }
             }
 
+            #[cfg(target_arch = "x86_64")]
+            unsafe { crate::serial_out(b'4'); }
             let mut aligned = arena.checked_align_in(arch::PAGE_SIZE).unwrap();
             let bookkeeping_size = bookkeeping_size(aligned.size());
 
             // We can't use empty arenas anyway
             if aligned.is_empty() {
+                #[cfg(target_arch = "x86_64")]
+                unsafe { crate::serial_out(b'5'); }
+                #[cfg(not(target_arch = "x86_64"))]
                 tracing::warn!("arena is too small (empty), skipping");
                 continue;
             }
@@ -293,6 +326,9 @@ impl FallibleIterator for ArenaSelections {
 
             // The arena has no space to hold its own bookkeeping
             if bookkeeping_start < aligned.start {
+                #[cfg(target_arch = "x86_64")]
+                unsafe { crate::serial_out(b'6'); }
+                #[cfg(not(target_arch = "x86_64"))]
                 tracing::warn!("arena is too small for bookkeeping, skipping {aligned:#x?}");
                 continue;
             }
@@ -300,12 +336,16 @@ impl FallibleIterator for ArenaSelections {
             let bookkeeping = Range::from(bookkeeping_start..aligned.end);
             aligned.end = bookkeeping.start;
 
+            #[cfg(target_arch = "x86_64")]
+            unsafe { crate::serial_out(b'7'); }
             return Ok(Some(ArenaSelection {
                 arena: aligned,
                 bookkeeping,
                 wasted_bytes: mem::take(&mut self.wasted_bytes),
             }));
         }
+        #[cfg(target_arch = "x86_64")]
+        unsafe { crate::serial_out(b'8'); }
         Ok(None)
     }
 }

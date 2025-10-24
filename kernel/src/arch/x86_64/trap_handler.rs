@@ -19,7 +19,16 @@ cpu_local! {
 
 #[cold]
 pub fn init() {
-    // Ensure TRAP_STACK is not optimized out by referencing it
+    // On x86_64, avoid touching TLS-backed TRAP_STACK during early bring-up.
+    // Just emit breadcrumbs and return; we'll wire a real IDT later.
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { crate::serial_out(b'H'); }
+        unsafe { crate::serial_out(b'K'); }
+        return;
+    }
+
+    // Non-x86_64: ensure TRAP_STACK is not optimized out by referencing it
     let _trap_stack_top = unsafe {
         TRAP_STACK
             .as_ptr()

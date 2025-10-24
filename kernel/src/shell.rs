@@ -8,11 +8,9 @@
 //! Basic kernel shell for debugging purposes, taken from
 //! <https://github.com/hawkw/mycelium/blob/main/src/shell.rs> (MIT)
 
-const S: &str = r#"
-   __    ___  ____
-  / /__ |_  ||_  /
- /  '_// __/_/_ <
-/_/\_\/____/____/
+pub const S: &str = r#"
+CXLOS Kernel Shell
+=================
 "#;
 
 use alloc::string::{String, ToString};
@@ -35,11 +33,47 @@ use crate::{arch, irq};
 
 static COMMANDS: &[Command] = &[PANIC, FAULT, VERSION, SHUTDOWN];
 
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn serial_write_byte_blocking(b: u8) {
+    const COM1_BASE: u16 = 0x3F8;
+    const DATA_REG: u16 = COM1_BASE + 0;
+    const LSR: u16 = COM1_BASE + 5;
+    unsafe {
+        // wait for THR empty, with a simple timeout to avoid hard hangs
+        let mut spins: u32 = 0;
+        loop {
+            let mut st: u8 = 0;
+            core::arch::asm!("in al, dx", out("al") st, in("dx") LSR, options(nomem, preserves_flags));
+            if st & 0x20 != 0 { break; }
+            spins = spins.wrapping_add(1);
+            if spins > 1_000_000 { break; }
+        }
+        core::arch::asm!("out dx, al", in("dx") DATA_REG, in("al") b, options(nomem, preserves_flags));
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn serial_write_str_blocking(s: &str) {
+    for b in s.bytes() { serial_write_byte_blocking(b); }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn serial_write_line_blocking(s: &str) {
+    serial_write_str_blocking(s);
+    serial_write_str_blocking("\r\n");
+}
+
 pub fn init(devtree: &'static DeviceTree, sched: &'static Executor, num_cpus: usize) {
     // The `Barrier` below is here so that the maybe verbose startup logging is
     // out of the way before dropping the user into the kernel shell. If we don't
     // wait for the last CPU to have finished initializing it will mess up the shell output.
     static SYNC: OnceLock<Barrier> = OnceLock::new();
+    // On x86_64 we currently run only on the boot CPU.
+    // Avoid waiting for non-existent secondary CPUs.
+    #[cfg(target_arch = "x86_64")]
+    let n = 1;
+    #[cfg(not(target_arch = "x86_64"))]
     let n = core::cmp::max(num_cpus, 1);
     let barrier = SYNC.get_or_init(|| Barrier::new(n));
 
@@ -99,6 +133,36 @@ pub fn init(devtree: &'static DeviceTree, sched: &'static Executor, num_cpus: us
                         line.clear();
                     }
                 }
+            })
+            .unwrap();
+    }
+}
+
+// x86_64: variant of init that does not require a DeviceTree reference
+#[cfg(target_arch = "x86_64")]
+pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
+    // Mirror the barrier behavior but force n=1 to avoid waiting for non-existent CPUs
+    use spin::{Barrier, OnceLock};
+    static SYNC: OnceLock<Barrier> = OnceLock::new();
+    let _ = num_cpus; // not used
+    let barrier = SYNC.get_or_init(|| Barrier::new(1));
+
+    if barrier.wait().is_leader() {
+        unsafe {
+            // Print banner directly to serial as a fallback
+            crate::serial_out(b'\r');
+            crate::serial_out(b'\n');
+            for &b in S.as_bytes() { crate::serial_out(b); }
+            crate::serial_out(b'\r');
+            crate::serial_out(b'\n');
+            let hint = b"type `help` to list available commands\r\n";
+            for &b in hint { crate::serial_out(b); }
+        }
+
+        // spawn a simple polling-based serial console
+        sched
+            .try_spawn(async move {
+                x86_serial_console().await;
             })
             .unwrap();
     }
@@ -240,8 +304,9 @@ async fn x86_serial_console() {
         for b in s.bytes() { write_byte(b); }
     }
 
-    // Initialize COM1 then print a prompt
+    // Initialize COM1 then print a startup marker and prompt
     serial_init();
+    write_byte(b'S'); // console started
     write_str("\r\n> ");
 
     let mut line = String::new();
@@ -301,19 +366,58 @@ async fn x86_serial_console() {
 
 pub fn eval(line: &str) {
     if line == "help" {
-        tracing::info!(target: "shell", "available commands:");
-        print_help("", COMMANDS);
-        tracing::info!(target: "shell", "");
-        tracing::info!(target: "shell", "BusyBox commands:");
-        tracing::info!(target: "shell", "  busybox --- list all busybox commands");
-        tracing::info!(target: "shell", "  or run any busybox command directly (e.g., echo, pwd, uname)");
+        // Non-x86_64: use tracing
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            tracing::info!(target: "shell", "available commands:");
+            print_help("", COMMANDS);
+            tracing::info!(target: "shell", "");
+            tracing::info!(target: "shell", "BusyBox commands:");
+            tracing::info!(target: "shell", "  busybox --- list all busybox commands");
+            tracing::info!(target: "shell", "  or run any busybox command directly (e.g., echo, pwd, uname)");
+        }
+
+        // x86_64: print directly to serial; avoid tracing to prevent hangs
+        #[cfg(target_arch = "x86_64")]
+        {
+            // tiny breadcrumb
+            serial_write_byte_blocking(b'^');
+            serial_write_line_blocking("[help] enter");
+            serial_write_line_blocking("available commands:");
+            for cmd in COMMANDS {
+                use core::fmt::Write;
+                let mut buf = alloc::string::String::new();
+                let _ = write!(&mut buf, "  {}", cmd);
+                serial_write_line_blocking(&buf);
+            }
+            serial_write_line_blocking("");
+            serial_write_line_blocking("BusyBox commands:");
+            serial_write_line_blocking("  busybox --- list all busybox commands");
+            serial_write_line_blocking("  or run any busybox command directly (e.g., echo, pwd, uname)");
+            serial_write_line_blocking("[help] done");
+        }
         return;
     }
 
     if line == "busybox" {
-        tracing::info!(target: "shell", "BusyBox v1.36.1 commands:");
-        for cmd in busybox::BUSYBOX_COMMANDS {
-            tracing::info!(target: "shell", "  {} --- {}", cmd.name, cmd.description);
+        // Non-x86_64: use tracing
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            tracing::info!(target: "shell", "BusyBox v1.36.1 commands:");
+            for cmd in busybox::BUSYBOX_COMMANDS {
+                tracing::info!(target: "shell", "  {} --- {}", cmd.name, cmd.description);
+            }
+        }
+        // x86_64: mirror list to serial only
+        #[cfg(target_arch = "x86_64")]
+        {
+            serial_write_line_blocking("BusyBox v1.36.1 commands:");
+            for cmd in busybox::BUSYBOX_COMMANDS {
+                use core::fmt::Write;
+                let mut buf = alloc::string::String::new();
+                let _ = write!(&mut buf, "  {} --- {}", cmd.name, cmd.description);
+                serial_write_line_blocking(&buf);
+            }
         }
         return;
     }
@@ -322,6 +426,7 @@ pub fn eval(line: &str) {
     let parts: alloc::vec::Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
     if !parts.is_empty() {
         // Try WASM BusyBox for simple no-arg commands if initialized
+        #[cfg(not(target_arch = "x86_64"))]
         if busybox::wasm_loader::is_initialized() {
             let cmd = parts[0].as_str();
             let args: alloc::vec::Vec<&str> = parts.iter().skip(1).map(|s| s.as_str()).collect();
@@ -335,12 +440,34 @@ pub fn eval(line: &str) {
             match impl_fn.execute(&mut ctx) {
                 Ok(output) => {
                     if !output.is_empty() {
-                        tracing::info!(target: "shell", "{}", output.trim_end());
+                        #[cfg(not(target_arch = "x86_64"))]
+                        {
+                            tracing::info!(target: "shell", "{}", output.trim_end());
+                        }
+                        #[cfg(target_arch = "x86_64")]
+                        {
+                            if output.ends_with('\n') {
+                                // already terminated
+                                serial_write_str_blocking(&output);
+                            } else {
+                                serial_write_line_blocking(&output);
+                            }
+                        }
                     }
                     return;
                 }
                 Err(e) => {
-                    tracing::error!(target: "shell", "{}: {}", ctx.args[0], e);
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        tracing::error!(target: "shell", "{}: {}", ctx.args[0], e);
+                    }
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        use core::fmt::Write;
+                        let mut buf = alloc::string::String::new();
+                        let _ = write!(&mut buf, "{}: {}", ctx.args[0], e);
+                        serial_write_line_blocking(&buf);
+                    }
                     return;
                 }
             }

@@ -1116,16 +1116,39 @@ impl TlsAllocation {
 
             // Then zero the BSS section (from file_size to mem_size)
             if self.template.mem_size > self.template.file_size {
-                let bss_start = region.start + self.template.file_size;
-                let bss_size = self.template.mem_size - self.template.file_size;
-                log::trace!(
-                    "TLS BSS zero: hart={} start={:#x} size={}",
-                    hartid,
-                    bss_start,
-                    bss_size
-                );
-                let bss: &mut [u8] = slice::from_raw_parts_mut(bss_start as *mut u8, bss_size);
-                bss.fill(0);
+                // On x86_64 variant II, reserve the first 8 bytes for the self-pointer.
+                // If file_size < 8, we must not zero the self-pointer we just wrote.
+                #[cfg(target_arch = "x86_64")]
+                let (bss_start, bss_size) = {
+                    let protected = 8usize;
+                    if self.template.file_size < protected {
+                        let start = region.start + protected;
+                        let size = self.template.mem_size.saturating_sub(protected);
+                        (start, size)
+                    } else {
+                        let start = region.start + self.template.file_size;
+                        let size = self.template.mem_size - self.template.file_size;
+                        (start, size)
+                    }
+                };
+                #[cfg(not(target_arch = "x86_64"))]
+                let (bss_start, bss_size) = {
+                    let start = region.start + self.template.file_size;
+                    let size = self.template.mem_size - self.template.file_size;
+                    (start, size)
+                };
+
+                if bss_size > 0 {
+                    log::trace!(
+                        "TLS BSS zero: hart={} start={:#x} size={}",
+                        hartid,
+                        bss_start,
+                        bss_size
+                    );
+                    let bss: &mut [u8] =
+                        slice::from_raw_parts_mut(bss_start as *mut u8, bss_size);
+                    bss.fill(0);
+                }
             }
 
             // For x86_64, verify the self-pointer is still intact

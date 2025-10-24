@@ -25,6 +25,12 @@ impl Cpu {
         Ok(Self { id: cpuid, clock })
     }
 
+    /// x86_64 convenience: construct without a device tree reference.
+    pub fn new_without_dt(cpuid: usize) -> crate::Result<Self> {
+        let clock = super::clock::new()?;
+        Ok(Self { id: cpuid, clock })
+    }
+
     pub fn interrupt_controller(&self) -> core::cell::RefMut<'_, dyn InterruptController> {
         todo!();
     }
