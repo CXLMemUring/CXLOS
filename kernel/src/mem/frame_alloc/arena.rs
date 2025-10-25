@@ -57,8 +57,7 @@ impl fmt::Debug for Arena {
 
 impl Arena {
     pub fn from_selection(selection: ArenaSelection) -> Self {
-        #[cfg(target_arch = "x86_64")]
-        unsafe { crate::serial_out(b'A'); }
+        crate::boot_marker(b'A');
         debug_assert!(selection.bookkeeping.size() >= bookkeeping_size(selection.arena.size()));
 
         // Safety: arena selection has ensured the region is valid
@@ -73,20 +72,16 @@ impl Arena {
                 selection.bookkeeping.size() / ARENA_PAGE_BOOKKEEPING_SIZE,
             )
         };
-        #[cfg(target_arch = "x86_64")]
-        unsafe { crate::serial_out(b'B'); }
+        crate::boot_marker(b'B');
 
         let mut remaining_bytes = selection.arena.size();
         let mut addr = selection.arena.start;
         let mut total_frames = 0;
         let mut max_order = 0;
         let mut free_lists = [const { List::new() }; MAX_ORDER];
-        #[cfg(target_arch = "x86_64")]
-        unsafe { crate::serial_out(b'C'); }
+        crate::boot_marker(b'C');
 
         while remaining_bytes > 0 {
-            #[cfg(target_arch = "x86_64")]
-            unsafe { crate::serial_out(b'D'); }
             let max_align = addr.get() & (!addr.get() + 1);
             let max_size = prev_power_of_two(remaining_bytes);
 
@@ -104,12 +99,9 @@ impl Arena {
                 debug_assert!(addr.is_aligned_to(arch::PAGE_SIZE));
                 let offset = addr.checked_sub_addr(selection.arena.start).unwrap();
                 let idx = offset / arch::PAGE_SIZE;
-                #[cfg(target_arch = "x86_64")]
-                unsafe { crate::serial_out(b'E'); }
                 let frame = slots[idx].write(FrameInfo::new(addr)).into();
                 free_lists[order].push_back(frame);
-                #[cfg(target_arch = "x86_64")]
-                unsafe { crate::serial_out(b'F'); }
+                // no per-iteration serial logging
             }
 
             addr = addr.checked_add(size).unwrap();
@@ -117,18 +109,20 @@ impl Arena {
         }
 
         // Make sure we've accounted for all frames
+        #[cfg(not(target_arch = "x86_64"))]
         debug_assert_eq!(total_frames, selection.arena.size() / arch::PAGE_SIZE);
-        #[cfg(target_arch = "x86_64")]
-        unsafe { crate::serial_out(b'G'); }
+        crate::boot_marker(b'G');
 
-        Self {
+        let out = Self {
             range: selection.arena,
             slots,
             free_lists,
             max_order,
             used_frames: 0,
             total_frames,
-        }
+        };
+        crate::boot_marker(b'R');
+        out
     }
 
     pub fn max_alignment(&self) -> usize {

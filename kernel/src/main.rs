@@ -65,6 +65,7 @@ use crate::backtrace::Backtrace;
 use crate::device_tree::DeviceTree;
 use crate::mem::bootstrap_alloc::BootstrapAllocator;
 use crate::state::{CpuLocal, Global};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
@@ -76,6 +77,17 @@ unsafe fn serial_out(byte: u8) {
         options(nostack, preserves_flags)
     );
 }
+
+// Breadcrumb writer for early boot debugging. Enable with `--features boot_debug`.
+#[cfg(all(target_arch = "x86_64", feature = "boot_debug"))]
+#[inline(always)]
+pub fn boot_marker(b: u8) {
+    unsafe { serial_out(b) }
+}
+
+#[cfg(any(not(target_arch = "x86_64"), not(feature = "boot_debug")))]
+#[inline(always)]
+pub fn boot_marker(_b: u8) {}
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
@@ -164,9 +176,8 @@ fn _rust_start_impl(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64)
         );
     }
 
-    // FIXME: Temporarily disable panic hook on x86_64 as it's hanging
-    // This might be due to TLS not being properly initialized or
-    // panic_unwind2 having issues on x86_64
+    // Set up panic hook
+    // FIXME: Temporarily disable panic hook on x86_64 as it requires TLS which isn't set up yet
     #[cfg(not(target_arch = "x86_64"))]
     panic_unwind2::set_hook(|info| {
         tracing::error!("CPU {info}");
@@ -212,13 +223,109 @@ fn _rust_start_impl(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64)
         );
     }
 
-    // FIXME: On x86_64, skip the panic unwinding for now and call kmain directly
+    // EARLY FORCE CONSOLE: drop into a minimal blocking serial shell immediately.
+    // This bypasses all heavy init to guarantee an interactive prompt when debugging
+    // early boot issues on x86_64.
+    const FORCE_EARLY_CONSOLE: bool = false;
+
     #[cfg(target_arch = "x86_64")]
-    {
-        kmain(cpuid, boot_info, boot_ticks);
-        arch::exit(0);
+    if FORCE_EARLY_CONSOLE {
+        // Minimal COM1 init
+        const COM1_BASE: u16 = 0x3F8;
+        const DATA_REG: u16 = COM1_BASE + 0;
+        const IER: u16 = COM1_BASE + 1;
+        const FCR: u16 = COM1_BASE + 2;
+        const LCR: u16 = COM1_BASE + 3;
+        const MCR: u16 = COM1_BASE + 4;
+        const LSR: u16 = COM1_BASE + 5;
+
+        unsafe {
+            // Disable interrupts
+            core::arch::asm!("out dx, al", in("dx") IER, in("al") 0u8, options(nomem, preserves_flags));
+            // Enable DLAB
+            core::arch::asm!("out dx, al", in("dx") LCR, in("al") 0x80u8, options(nomem, preserves_flags));
+            // Set baud 115200 (divisor 1)
+            core::arch::asm!("out dx, al", in("dx") DATA_REG, in("al") 0x01u8, options(nomem, preserves_flags));
+            core::arch::asm!("out dx, al", in("dx") IER, in("al") 0x00u8, options(nomem, preserves_flags));
+            // 8N1
+            core::arch::asm!("out dx, al", in("dx") LCR, in("al") 0x03u8, options(nomem, preserves_flags));
+            // Enable FIFO
+            core::arch::asm!("out dx, al", in("dx") FCR, in("al") 0xC7u8, options(nomem, preserves_flags));
+            // RTS/DSR, OUT2
+            core::arch::asm!("out dx, al", in("dx") MCR, in("al") 0x0Bu8, options(nomem, preserves_flags));
+        }
+
+        #[inline]
+        fn putb(b: u8) {
+            unsafe {
+                loop {
+                    let mut st: u8 = 0;
+                    core::arch::asm!("in al, dx", out("al") st, in("dx") LSR, options(nomem, preserves_flags));
+                    if st & 0x20 != 0 { break; }
+                }
+                core::arch::asm!("out dx, al", in("dx") DATA_REG, in("al") b, options(nomem, preserves_flags));
+            }
+        }
+        fn puts(s: &str) { for &b in s.as_bytes() { putb(b); } }
+        fn getb() -> Option<u8> {
+            unsafe {
+                let mut st: u8 = 0;
+                core::arch::asm!("in al, dx", out("al") st, in("dx") LSR, options(nomem, preserves_flags));
+                if st & 0x01 == 0 { return None; }
+                let mut d: u8 = 0;
+                core::arch::asm!("in al, dx", out("al") d, in("dx") DATA_REG, options(nomem, preserves_flags));
+                Some(d)
+            }
+        }
+
+        // Print a simple banner and hint
+        puts("\r\n");
+        puts(crate::shell::S);
+        puts("\r\n");
+        puts("type `help` to list available commands\r\n");
+        puts("> ");
+        let mut line = alloc::string::String::new();
+        let mut idle_ticks: u64 = 0;
+        loop {
+            if CONTINUE_BOOT.load(Ordering::SeqCst) {
+                break;
+            }
+            match getb() {
+                Some(b) => {
+                    match b as char {
+                        '\r' | '\n' => {
+                            putb(b'\r'); putb(b'\n');
+                            if !line.is_empty() {
+                                crate::shell::eval(&line);
+                                line.clear();
+                            }
+                            puts("> ");
+                        }
+                        '\x7F' | '\x08' => {
+                            if !line.is_empty() {
+                                line.pop();
+                                putb(b'\x08'); putb(b' '); putb(b'\x08');
+                            }
+                        }
+                        c if c.is_ascii() && !c.is_control() => {
+                            line.push(c);
+                            putb(b as u8);
+                        }
+                        _ => {}
+                    }
+                    idle_ticks = 0;
+                }
+                None => {
+                    idle_ticks = idle_ticks.saturating_add(1);
+                    if idle_ticks > 2_000 { break; }
+                    // small pause to avoid pegging CPU
+                    for _ in 0..10_000 { core::hint::spin_loop(); }
+                }
+            }
+        }
     }
 
+    // Enable panic unwinding
     #[cfg(not(target_arch = "x86_64"))]
     {
         let res = panic_unwind2::catch_unwind(|| {
@@ -235,21 +342,34 @@ fn _rust_start_impl(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64)
             }
         }
     }
+
+    // FIXME: On x86_64, skip panic unwinding for now until TLS is properly set up
+    #[cfg(target_arch = "x86_64")]
+    {
+        kmain(cpuid, boot_info, boot_ticks);
+        arch::exit(0);
+    }
 }
 
 fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
     // Enter kmain
+    boot_marker(b'K');  // Entered kmain
+
     // perform EARLY per-cpu, architecture-specific initialization
     // (e.g. resetting the FPU)
     arch::per_cpu_init_early();
+    boot_marker(b'k');  // After per_cpu_init_early
 
     tracing::per_cpu_init_early(cpuid);
+    boot_marker(b'T');  // After tracing per_cpu_init_early
 
     // after tracing::per_cpu_init_early
 
     // before locate_device_tree
 
+    boot_marker(b'D');  // Before locate_device_tree
     let (fdt, fdt_region_phys) = locate_device_tree(boot_info);
+    boot_marker(b'd');  // After locate_device_tree
 
     // after locate_device_tree
 
@@ -274,9 +394,12 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         // is available
         let allocatable_memories = allocatable_memory_regions(boot_info);
 
-        // FIXME: Skip tracing::info on x86_64 as it hangs
+        // Skip tracing on x86_64 until fully initialized
         #[cfg(not(target_arch = "x86_64"))]
         tracing::info!("allocatable memories: {:?}", allocatable_memories);
+
+        #[cfg(target_arch = "x86_64")]
+        boot_marker(b'A');  // After allocatable memories
 
         let mut boot_alloc = BootstrapAllocator::new(&allocatable_memories);
         // after boot_alloc new
@@ -323,12 +446,12 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
 
         // fully initialize the tracing subsystem now that we can allocate
         #[cfg(not(target_arch = "x86_64"))]
-        {
-            tracing::init(bootargs.log);
-        }
-        // On x86_64, skip tracing init to reach the shell quickly
+        tracing::init(bootargs.log);
         #[cfg(target_arch = "x86_64")]
-        unsafe { serial_out(b't'); }
+        {
+            // Defer full tracing on x86_64 until TLS is properly set up
+            // For now, just use basic serial output
+        }
 
         // after tracing fully initialized
         // perform global, architecture-specific initialization
@@ -336,102 +459,13 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         #[cfg(target_arch = "x86_64")]
         unsafe { serial_out(b'^'); }
 
-        // FAST PATH (x86_64): run a blocking serial console directly to ensure input works
-        // Gate behind a const so we can disable when it interferes.
         #[cfg(target_arch = "x86_64")]
         {
             const FAST_PATH: bool = false;
-            if FAST_PATH {
-            // Minimal COM1 init
-            const COM1_BASE: u16 = 0x3F8;
-            const DATA_REG: u16 = COM1_BASE + 0;
-            const IER: u16 = COM1_BASE + 1;
-            const FCR: u16 = COM1_BASE + 2;
-            const LCR: u16 = COM1_BASE + 3;
-            const MCR: u16 = COM1_BASE + 4;
-            const LSR: u16 = COM1_BASE + 5;
-
-            unsafe {
-                // Disable interrupts
-                core::arch::asm!("out dx, al", in("dx") IER, in("al") 0u8, options(nomem, preserves_flags));
-                // Enable DLAB
-                core::arch::asm!("out dx, al", in("dx") LCR, in("al") 0x80u8, options(nomem, preserves_flags));
-                // Set baud 115200 (divisor 1)
-                core::arch::asm!("out dx, al", in("dx") DATA_REG, in("al") 0x01u8, options(nomem, preserves_flags));
-                core::arch::asm!("out dx, al", in("dx") IER, in("al") 0x00u8, options(nomem, preserves_flags));
-                // 8N1
-                core::arch::asm!("out dx, al", in("dx") LCR, in("al") 0x03u8, options(nomem, preserves_flags));
-                // Enable FIFO
-                core::arch::asm!("out dx, al", in("dx") FCR, in("al") 0xC7u8, options(nomem, preserves_flags));
-                // RTS/DSR, OUT2
-                core::arch::asm!("out dx, al", in("dx") MCR, in("al") 0x0Bu8, options(nomem, preserves_flags));
-            }
-
-            #[inline]
-            fn putb(b: u8) {
-                unsafe {
-                    // wait for THRE
-                    loop {
-                        let mut st: u8 = 0;
-                        core::arch::asm!("in al, dx", out("al") st, in("dx") LSR, options(nomem, preserves_flags));
-                        if st & 0x20 != 0 { break; }
-                    }
-                    core::arch::asm!("out dx, al", in("dx") DATA_REG, in("al") b, options(nomem, preserves_flags));
-                }
-            }
-            fn puts(s: &str) { for &b in s.as_bytes() { putb(b); } }
-            fn getb() -> Option<u8> {
-                unsafe {
-                    let mut st: u8 = 0;
-                    core::arch::asm!("in al, dx", out("al") st, in("dx") LSR, options(nomem, preserves_flags));
-                    if st & 0x01 == 0 { return None; }
-                    let mut d: u8 = 0;
-                    core::arch::asm!("in al, dx", out("al") d, in("dx") DATA_REG, options(nomem, preserves_flags));
-                    Some(d)
-                }
-            }
-
-                use alloc::string::String;
-
-                // Print a simple banner and hint (mirrors shell::init fallback)
-                puts("\r\n");
-                puts(crate::shell::S);
-                puts("\r\n");
-                puts("type `help` to list available commands\r\n");
-                puts("> ");
-                let mut line = String::new();
-                loop {
-                    if let Some(b) = getb() {
-                        match b as char {
-                            '\r' | '\n' => {
-                                putb(b'\r'); putb(b'\n');
-                                if !line.is_empty() {
-                                    // Mark eval begin/end to debug potential hangs
-                                    putb(b'!');
-                                    crate::shell::eval(&line);
-                                    putb(b'?');
-                                    line.clear();
-                                }
-                                puts("> ");
-                            }
-                            '\x7F' | '\x08' => {
-                                if !line.is_empty() {
-                                    line.pop();
-                                    putb(b'\x08'); putb(b' '); putb(b'\x08');
-                                }
-                            }
-                            c if c.is_ascii() && !c.is_control() => {
-                                line.push(c);
-                                putb(b as u8);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
+            if FAST_PATH { /* fast path disabled */ }
         }
 
-        // x86_64: optionally skip heavy memory/fs init to reach shell quickly
+        // x86_64: skip heavy memory/fs init to reach shell quickly
         #[cfg(target_arch = "x86_64")]
         const SKIP_MEM_INIT: bool = false;
 
@@ -439,17 +473,17 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         if !SKIP_MEM_INIT {
             // initialize the global frame allocator
             let frame_alloc = frame_alloc::init(boot_alloc, fdt_region_phys);
-            unsafe { serial_out(b'~'); }
+            boot_marker(b'~');
 
             // initialize the virtual memory subsystem
             mem::init(boot_info, &mut rng, frame_alloc).unwrap();
-            unsafe { serial_out(b'#'); }
+            boot_marker(b'#');
 
             // initialize the filesystem
-            unsafe { serial_out(b'I'); }
-            unsafe { serial_out(b'.'); }
+            boot_marker(b'I');
+            boot_marker(b'.');
             fs::init().unwrap();
-            unsafe { serial_out(b'@'); }
+            boot_marker(b'@');
         }
 
         #[cfg(not(target_arch = "x86_64"))]
@@ -463,46 +497,40 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         }
 
         // Optionally initialize WASM BusyBox (requires prebuilt wasm + feature flag)
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            if let Ok(true) = busybox::wasm_loader::try_init_wasm_busybox() {
-                tracing::info!("Initialized WASM BusyBox module");
-            } else {
-                tracing::warn!("WASM BusyBox module not initialized");
-            }
+        if let Ok(true) = busybox::wasm_loader::try_init_wasm_busybox() {
+            tracing::info!("Initialized WASM BusyBox module");
+        } else {
+            tracing::warn!("WASM BusyBox module not initialized");
         }
-        // x86_64: skip WASM BusyBox initialization entirely for now
         #[cfg(target_arch = "x86_64")]
-        unsafe { serial_out(b'&'); }
-        #[cfg(target_arch = "x86_64")]
-        unsafe { serial_out(b'z'); }
+        boot_marker(b'&');
 
         // perform LATE per-cpu, architecture-specific initialization
         // (e.g. setting the trap vector and enabling interrupts)
         #[cfg(target_arch = "x86_64")]
         let cpu = {
             // breadcrumb before Cpu::new
-            unsafe { serial_out(b'0'); }
+            boot_marker(b'0');
             // Instrument non-fast-path to locate hangs
-            unsafe { serial_out(b'1'); }
+            boot_marker(b'1');
             let cpu = arch::device::cpu::Cpu::new_without_dt(cpuid)?;
-            unsafe { serial_out(b'2'); }
+            boot_marker(b'2');
             cpu
         };
 
         #[cfg(not(target_arch = "x86_64"))]
         let cpu = arch::device::cpu::Cpu::new(&device_tree, cpuid)?;
 
-        unsafe { serial_out(b'3'); }
+        boot_marker(b'3');
         #[cfg(target_arch = "x86_64")]
         let executor = Executor::with_capacity(1).unwrap();
         #[cfg(not(target_arch = "x86_64"))]
         let executor = Executor::with_capacity(boot_info.cpu_mask.count_ones() as usize).unwrap();
-        unsafe { serial_out(b'4'); }
+        boot_marker(b'4');
         let timer = Timer::new(Duration::from_millis(1), cpu.clock);
-        unsafe { serial_out(b'5'); }
+        boot_marker(b'5');
 
-        unsafe { serial_out(b'6'); }
+        boot_marker(b'6');
         Ok(Global {
             time_origin: Instant::from_ticks(&timer, Ticks(boot_ticks)),
             timer,
@@ -518,27 +546,13 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
     .unwrap_or_else(|err| {
         #[cfg(target_arch = "x86_64")]
         {
-            let msg = err.to_string();
-            unsafe {
-                serial_out(b'!');
-                for &byte in msg.as_bytes() {
-                    serial_out(byte);
-                }
-            }
+            let _ = err; // suppress serial dump when not boot_debug
         }
         panic!("global init failed: {err:?}");
     });
 
     // Checkpoint after global init returned: 'C'
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        core::arch::asm!(
-            "mov dx, 0x3F8\n\
-             mov al, 0x43\n\
-             out dx, al",
-            options(nomem, nostack, preserves_flags)
-        );
-    }
+    boot_marker(b'C');
 
     // perform LATE per-cpu, architecture-specific initialization
     // (e.g. setting the trap vector and enabling interrupts)
@@ -548,7 +562,7 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
     #[cfg(target_arch = "x86_64")]
     let arch_state = {
         let st = arch::per_cpu_init_late_no_dt(cpuid).unwrap();
-        unsafe { serial_out(b'%'); }
+        boot_marker(b'%');
         st
     };
 
@@ -563,12 +577,10 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
         Instant::now(&global.timer).duration_since(Instant::ZERO),
         Instant::from_ticks(&global.timer, Ticks(boot_ticks)).elapsed(&global.timer)
     );
-    #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'B'); }
+    boot_marker(b'B');
 
     let mut worker2 = Worker::new(&global.executor, FastRand::from_seed(rng.next_u64())).unwrap();
-    #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'W'); }
+    boot_marker(b'W');
 
     cfg_if! {
         if #[cfg(test)] {
@@ -588,7 +600,7 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
             #[cfg(target_arch = "x86_64")]
             {
                 // debug: entering shell::init
-                unsafe { serial_out(b'>'); }
+                boot_marker(b'>');
                 shell::init_x86(&global.executor, 1);
             }
             arch::block_on(worker2.run(futures::future::pending::<()>())).unwrap_err(); // the only way `run` can return is when the executor is closed
@@ -654,20 +666,14 @@ fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAd
     // complex merging that may touch unmapped bookkeeping.
     #[cfg(target_arch = "x86_64")]
     {
+        // Keep the top 8 largest regions to progressively reintroduce multiple arenas
         if !temp.is_empty() {
-            let mut max_idx = 0usize;
-            let mut max_size = 0usize;
-            for (i, r) in temp.iter().enumerate() {
-                let sz = r.size();
-                if sz > max_size {
-                    max_size = sz;
-                    max_idx = i;
-                }
-            }
-            // Keep only the largest region
-            let keep = temp[max_idx];
-            temp.clear();
-            temp.push(keep);
+            let mut v: alloc::vec::Vec<_> = temp.into_iter().collect();
+            v.sort_by_key(|r| core::cmp::Reverse(r.size()));
+            v.truncate(8);
+            let mut arr = ArrayVec::<Range<PhysicalAddress>, 16>::new();
+            for r in v { arr.push(r); }
+            temp = arr;
         }
     }
 
@@ -711,4 +717,12 @@ fn locate_device_tree(boot_info: &BootInfo) -> (&'static [u8], Range<PhysicalAdd
         slice,
         Range::from(PhysicalAddress::new(fdt.range.start)..PhysicalAddress::new(fdt.range.end)),
     )
+}
+// Gate to allow continuing full boot from the early console.
+#[cfg(target_arch = "x86_64")]
+static CONTINUE_BOOT: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_arch = "x86_64")]
+pub fn request_continue_boot() {
+    CONTINUE_BOOT.store(true, Ordering::SeqCst);
 }

@@ -17,7 +17,7 @@ mod trap_handler;
 mod vmo;
 
 use alloc::format;
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use core::num::NonZeroUsize;
 use core::range::Range;
@@ -60,6 +60,7 @@ pub fn init(
     rand: &mut impl rand::RngCore,
     frame_alloc: &'static FrameAllocator,
 ) -> crate::Result<()> {
+    crate::boot_marker(b'M');
     KERNEL_ASPACE.get_or_try_init(|| -> crate::Result<_> {
         let (hw_aspace, mut flush) = arch::AddressSpace::from_active(arch::DEFAULT_ASID);
 
@@ -74,16 +75,17 @@ pub fn init(
 
         reserve_wired_regions(&mut aspace, boot_info, &mut flush);
         flush.flush().unwrap();
-
         tracing::trace!("Kernel AddressSpace {aspace:?}");
 
         Ok(Arc::new(Mutex::new(aspace)))
     })?;
+    crate::boot_marker(b'N');
 
     Ok(())
 }
 
 fn reserve_wired_regions(aspace: &mut AddressSpace, boot_info: &BootInfo, flush: &mut Flush) {
+    crate::boot_marker(b'p');
     // reserve the physical memory map
     aspace
         .reserve(
@@ -96,6 +98,7 @@ fn reserve_wired_regions(aspace: &mut AddressSpace, boot_info: &BootInfo, flush:
             flush,
         )
         .unwrap();
+    crate::boot_marker(b'q');
 
     // Safety: we have to trust the loaders BootInfo here
     let own_elf = unsafe {
@@ -121,36 +124,11 @@ fn reserve_wired_regions(aspace: &mut AddressSpace, boot_info: &BootInfo, flush:
                 .unwrap(),
         )
     };
-    let own_elf = match xmas_elf::ElfFile::new(own_elf) {
-        Ok(elf) => elf,
-        Err(_) => {
-            // Fallback: reserve the entire kernel virtual range with broad permissions (x86_64 minimal path)
-            #[cfg(target_arch = "x86_64")]
-            {
-                let range = Range::from(
-                    VirtualAddress::new(boot_info.kernel_virt.start)
-                        .unwrap()
-                        .align_down(arch::PAGE_SIZE)
-                        ..VirtualAddress::new(boot_info.kernel_virt.end)
-                            .unwrap()
-                            .checked_align_up(arch::PAGE_SIZE)
-                            .unwrap(),
-                );
-                aspace
-                    .reserve(
-                        range,
-                        Permissions::READ | Permissions::EXECUTE,
-                        Some("Kernel Image".to_string()),
-                        flush,
-                    )
-                    .unwrap();
-                return;
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            panic!("invalid kernel ELF in BootInfo");
-        }
-    };
+    let own_elf = xmas_elf::ElfFile::new(own_elf)
+        .expect("invalid kernel ELF in BootInfo (expected PT_LOAD segments)");
 
+    let mut seg_count = 0usize;
+    let mut summary = String::new();
     for ph in own_elf.program_iter() {
         if ph.get_type().unwrap() != Type::Load {
             continue;
@@ -179,22 +157,43 @@ fn reserve_wired_regions(aspace: &mut AddressSpace, boot_info: &BootInfo, flush:
             ph.virtual_addr() + ph.mem_size()
         );
 
+        // Record a summary line for this PT_LOAD
+        let seg_start = virt.align_down(arch::PAGE_SIZE);
+        let seg_end = virt
+            .checked_add(usize::try_from(ph.mem_size()).unwrap())
+            .unwrap()
+            .checked_align_up(arch::PAGE_SIZE)
+            .unwrap();
+        seg_count += 1;
+        let _ = core::fmt::write(
+            &mut summary,
+            format_args!(
+                "  - {start}..{end} perms={perms}\n",
+                start = seg_start,
+                end = seg_end,
+                perms = permissions
+            ),
+        );
+
         aspace
             .reserve(
-                Range {
-                    start: virt.align_down(arch::PAGE_SIZE),
-                    end: virt
-                        .checked_add(usize::try_from(ph.mem_size()).unwrap())
-                        .unwrap()
-                        .checked_align_up(arch::PAGE_SIZE)
-                        .unwrap(),
-                },
+                Range { start: seg_start, end: seg_end },
                 permissions,
                 Some(format!("Kernel {permissions} Segment")),
                 flush,
             )
             .unwrap();
     }
+    // One-shot summary of reserved PT_LOAD segments
+    if seg_count > 0 {
+        tracing::debug!(
+            "Reserved {seg_count} PT_LOAD segments:\n{}",
+            summary
+        );
+    } else {
+        tracing::warn!("No PT_LOAD segments found in kernel ELF");
+    }
+    crate::boot_marker(b't');
 }
 
 bitflags::bitflags! {

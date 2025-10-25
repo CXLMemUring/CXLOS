@@ -23,7 +23,7 @@ use crate::mem::VirtualAddress;
 
 static BACKTRACE_INFO: OnceLock<BacktraceInfo> = OnceLock::new();
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "boot_debug"))]
 #[inline(always)]
 unsafe fn serial_out(byte: u8) {
     core::arch::asm!(
@@ -36,23 +36,14 @@ unsafe fn serial_out(byte: u8) {
 
 #[cold]
 pub fn init(boot_info: &'static BootInfo, backtrace_style: BacktraceStyle) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // Temporarily disable heavy backtrace init on x86_64 during early bring-up.
-        unsafe {
-            serial_out(b'F');
-            serial_out(b'f');
-        }
-        return;
-    }
     // debug: 'F' entering backtrace::init
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "boot_debug"))]
     unsafe {
         serial_out(b'F');
     }
     BACKTRACE_INFO.get_or_init(|| BacktraceInfo::new(boot_info, backtrace_style));
     // debug: 'f' leaving backtrace::init
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "boot_debug"))]
     unsafe {
         serial_out(b'f');
     }
@@ -95,7 +86,7 @@ pub struct Backtrace<'a, const MAX_FRAMES: usize> {
 impl BacktraceInfo {
     fn new(boot_info: &'static BootInfo, backtrace_style: BacktraceStyle) -> Self {
         // debug: '1' entering BacktraceInfo::new
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "boot_debug"))]
         unsafe {
             serial_out(b'1');
         }
@@ -117,7 +108,7 @@ impl BacktraceInfo {
                         .unwrap()
                 } as *const u8;
                 // debug: '2' after computing ELF base
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(all(target_arch = "x86_64", feature = "boot_debug"))]
                 serial_out(b'2');
                 slice::from_raw_parts(
                     base,

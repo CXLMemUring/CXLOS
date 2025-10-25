@@ -97,22 +97,20 @@ impl DeviceTree {
                     options(nostack, preserves_flags)
                 );
             }
-            unsafe {
-                serial_out(b'D');
-            }
+            // breadcrumb only when boot_debug
+            #[cfg(feature = "boot_debug")]
+            unsafe { serial_out(b'D'); }
 
             // For x86_64, we need to satisfy the ouroboros self-referential structure
             // but Bump allocator hangs. Use a workaround.
-            unsafe {
-                serial_out(b'W');
-            }
+            #[cfg(feature = "boot_debug")]
+            unsafe { serial_out(b'W'); }
 
             // WORKAROUND: Create a minimal stub device tree for x86_64
             // that avoids Bump allocator issues
             // This will satisfy the type system but won't be used
-            unsafe {
-                serial_out(b'X');
-            }
+            #[cfg(feature = "boot_debug")]
+            unsafe { serial_out(b'X'); }
 
             // Create a minimal device tree using unsafe code to bypass Bump allocator
             // This is a hack but allows x86_64 to proceed

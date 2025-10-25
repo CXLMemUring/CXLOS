@@ -88,46 +88,44 @@ pub struct AllocError;
 
 impl FrameAllocator {
     pub fn new(boot_alloc: BootstrapAllocator, fdt_region: Range<PhysicalAddress>) -> Self {
-        #[cfg(target_arch = "x86_64")]
-        unsafe { crate::serial_out(b'A'); }
+        crate::boot_marker(b'A');
         let mut max_alignment = arch::PAGE_SIZE;
-        let mut arenas = Vec::new();
+        let mut arenas: Vec<Arena> = Vec::new();
+        #[cfg(target_arch = "x86_64")]
+        let mut x86_count: usize = 0;
 
         let phys_regions = boot_alloc
             .free_regions()
             .chain(iter::once(fdt_region))
             .collect();
 
-        #[cfg(target_arch = "x86_64")]
-        unsafe { crate::serial_out(b'B'); }
+        crate::boot_marker(b'B');
 
         for selection_result in select_arenas(phys_regions).iterator() {
-            #[cfg(target_arch = "x86_64")]
-            unsafe { crate::serial_out(b'C'); }
+            crate::boot_marker(b'C');
             match selection_result {
                 Ok(selection) => {
-                    #[cfg(target_arch = "x86_64")]
-                    unsafe { crate::serial_out(b'D'); }
+                    crate::boot_marker(b'D');
                     #[cfg(not(target_arch = "x86_64"))]
                     tracing::trace!("selection {selection:?}");
                     let arena = Arena::from_selection(selection);
-                    #[cfg(target_arch = "x86_64")]
-                    unsafe { crate::serial_out(b'H'); }
-                    #[cfg(not(target_arch = "x86_64"))]
                     tracing::trace!("max arena alignment {}", arena.max_alignment());
                     max_alignment = cmp::max(max_alignment, arena.max_alignment());
                     arenas.push(arena);
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        x86_count += 1;
+                        if x86_count >= 8 { break; }
+                    }
                 }
                 Err(err) => {
-                    #[cfg(target_arch = "x86_64")]
-                    unsafe { crate::serial_out(b'X'); }
+                    crate::boot_marker(b'X');
                     tracing::error!("unable to include RAM region {:?}", err.range);
                 }
             }
         }
 
-        #[cfg(target_arch = "x86_64")]
-        unsafe { crate::serial_out(b'F'); }
+        crate::boot_marker(b'F');
 
         FrameAllocator {
             global: Mutex::new(GlobalFrameAllocator { arenas }),

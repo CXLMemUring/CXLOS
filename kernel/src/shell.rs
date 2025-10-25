@@ -31,7 +31,7 @@ use crate::mem::{Mmap, PhysicalAddress, with_kernel_aspace};
 use crate::state::global;
 use crate::{arch, irq};
 
-static COMMANDS: &[Command] = &[PANIC, FAULT, VERSION, SHUTDOWN];
+static COMMANDS: &[Command] = &[PANIC, FAULT, VERSION, SHUTDOWN, BOOT];
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
@@ -533,6 +533,22 @@ const SHUTDOWN: Command = Command::new("shutdown")
 
         Ok(())
     });
+
+#[cfg(target_arch = "x86_64")]
+const BOOT: Command = Command::new("boot")
+    .with_help("continue full kernel boot from the early console.")
+    .with_fn(|_| {
+        // Signal the early console loop to exit and continue normal boot
+        crate::request_continue_boot();
+        #[cfg(target_arch = "x86_64")]
+        unsafe { super::serial_out(b'\r'); super::serial_out(b'\n'); }
+        Ok(())
+    });
+
+#[cfg(not(target_arch = "x86_64"))]
+const BOOT: Command = Command::new("boot")
+    .with_help("not available on this architecture")
+    .with_fn(|_| Ok(()));
 
 #[derive(Debug)]
 pub struct Command<'cmd> {
