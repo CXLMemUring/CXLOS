@@ -121,10 +121,28 @@ const TRAP_GATE: u8 = 0x8F;       // Present, DPL=0, Type=0xF (Trap Gate)
 
 #[cold]
 pub fn init() {
-    crate::boot_marker(b'H');
+    // Output 'H' directly to serial
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x48",
+            "out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
 
     // Get code segment selector (assumes flat memory model, GDT entry 1 is code segment)
     let code_segment: u16 = 0x08;  // GDT entry 1 (8 bytes each, 0-indexed)
+
+    // Output 'h' before setting up handlers
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x68",
+            "out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
 
     // Safety: We're initializing a static mut, which is safe during init
     unsafe {
@@ -161,16 +179,35 @@ pub fn init() {
             IDT.entries[i].set_handler(irq_generic as usize, code_segment, 0, INTERRUPT_GATE);
         }
 
-        // Load IDT
+        // Output 'i' before lidt
+        core::arch::asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x69",
+            "out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+
+        // Load IDT - use proper syntax
         let idtr = IdtPointer {
             limit: (core::mem::size_of::<Idt>() - 1) as u16,
             base: core::ptr::addr_of!(IDT) as u64,
         };
 
-        asm!("lidt [{}]", in(reg) &idtr, options(readonly, nostack, preserves_flags));
-    }
+        // Use Intel syntax for lidt which is more standard
+        core::arch::asm!(
+            "lidt [{}]",
+            in(reg) &idtr,
+            options(readonly, nostack, preserves_flags)
+        );
 
-    crate::boot_marker(b'K');
+        // Output 'K' after lidt
+        core::arch::asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x4B",
+            "out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
 }
 
 // Exception stubs - these save state and call the common handler
@@ -319,13 +356,58 @@ unsafe extern "C" fn exception_common() {
 
 /// Main trap handler called from assembly
 extern "C" fn default_trap_handler(frame: &mut TrapFrame) {
+    // Output 'T' to show trap handler was called
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x54",
+            "out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
     let vector = frame.vector;
     let error_code = frame.error_code;
+
+    // Only output for non-page-fault exceptions to avoid spam
+    if vector != 14 {
+        unsafe {
+            let marker = if vector < 10 {
+                b'0' + vector as u8
+            } else if vector < 36 {
+                b'A' + (vector - 10) as u8
+            } else {
+                b'Z'
+            };
+            core::arch::asm!(
+                "mov dx, 0x3F8",
+                "mov al, {0}",
+                "out dx, al",
+                in(reg_byte) marker,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
+
     let rip = VirtualAddress::new(frame.rip as usize).unwrap();
     let rbp = VirtualAddress::new(frame.rbp as usize).unwrap();
 
     // Read CR2 for page faults
     let cr2 = if vector == 14 {
+        static mut PF_COUNT: usize = 0;
+        unsafe {
+            PF_COUNT += 1;
+            // Output '.' every 10 page faults to show progress
+            if PF_COUNT % 10 == 0 {
+                core::arch::asm!(
+                    "mov dx, 0x3F8",
+                    "mov al, 0x2E",  // '.'
+                    "out dx, al",
+                    options(nomem, nostack, preserves_flags)
+                );
+            }
+        }
+
         let mut addr: u64;
         unsafe {
             asm!("mov {}, cr2", out(reg) addr, options(nomem, nostack));

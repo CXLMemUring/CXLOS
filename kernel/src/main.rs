@@ -71,10 +71,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 #[inline(always)]
 unsafe fn serial_out(byte: u8) {
     core::arch::asm!(
-        "out dx, al",
+        "out %al, %dx",
         in("al") byte,
         in("dx") 0x3F8u16,
-        options(nostack, preserves_flags)
+        options(nostack, preserves_flags, att_syntax)
     );
 }
 
@@ -149,32 +149,151 @@ extern "C" fn _start(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64
 #[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 extern "C" fn _rust_start(cpuid: usize, boot_info_ptr: usize, boot_ticks: u64) -> ! {
-    let boot_info = unsafe { &*(boot_info_ptr as *const BootInfo) };
-    _rust_start_impl(cpuid, boot_info, boot_ticks)
+    // ABSOLUTE FIRST - Raw serial output before ANY initialization
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x43",
+            "out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    // Now initialize IDT
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::trap_handler::init();
+
+    // Output 'D' after IDT init
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x44",
+            "out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    // Output 'B' before BootInfo handling
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x42",
+            "out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    // TODO(x86_64): BootInfo byte-copy workaround
+    // Creating a direct reference to loader's BootInfo hangs (Rust validation issue).
+    // Copy it byte-by-byte to avoid reference creation during early boot.
+    // Also copy the memory_regions array and fix the pointer.
+    unsafe {
+        use core::mem::MaybeUninit;
+        use loader_api::MemoryRegion;
+
+        // Debug marker before static declarations
+        core::arch::asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x42",  // 'B' - Before statics
+            "out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+
+        static mut BOOT_INFO_COPY: MaybeUninit<BootInfo> = MaybeUninit::uninit();
+        // Maximum memory regions we expect (should be enough for any machine)
+        static mut MEMORY_REGIONS_COPY: [MaybeUninit<MemoryRegion>; 256] =
+            [MaybeUninit::uninit(); 256];
+
+        // Debug marker after static declarations
+        core::arch::asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x53",  // 'S' - After statics
+            "out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+
+        let src_ptr = boot_info_ptr as *const BootInfo;
+        let src_bytes = src_ptr as *const u8;
+        let dst_ptr = core::ptr::addr_of_mut!(BOOT_INFO_COPY);
+        let dst_bytes = (*dst_ptr).as_mut_ptr() as *mut u8;
+        let size = core::mem::size_of::<BootInfo>();
+
+        // Debug marker before byte copy
+        core::arch::asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x62",  // 'b' - before byte copy
+            "out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+
+        // Copy BootInfo byte-by-byte using volatile operations
+        for i in 0..size {
+            let byte = core::ptr::read_volatile(src_bytes.add(i));
+            core::ptr::write_volatile(dst_bytes.add(i), byte);
+        }
+
+        // Debug marker after byte copy
+        core::arch::asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x63",  // 'c' - after byte copy
+            "out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+
+        // Now we need to fix the memory_regions pointer
+        // Read the ORIGINAL memory_regions info from the loader's BootInfo (still accessible)
+        // MemoryRegions is #[repr(C)] with ptr (*mut MemoryRegion) and len (usize)
+        // Calculate offset of memory_regions field in BootInfo
+        let loader_boot_info_ptr = boot_info_ptr as *const u8;
+        // BootInfo fields: cpu_mask (8 bytes) then memory_regions
+        // So memory_regions is at offset 8 on x86_64
+        let mem_regions_offset = core::mem::size_of::<usize>(); // size of cpu_mask field
+        let loader_mem_regions_ptr = loader_boot_info_ptr.add(mem_regions_offset);
+
+        // Read ptr and len fields from the LOADER's BootInfo (not the copy!)
+        // This way we can access the loader's memory regions array which is still mapped
+        let orig_regions_ptr = (loader_mem_regions_ptr as *const *mut MemoryRegion).read_volatile();
+        let regions_len = (loader_mem_regions_ptr.add(core::mem::size_of::<*mut MemoryRegion>()) as *const usize).read_volatile();
+
+        // Copy the memory regions array
+        for i in 0..regions_len.min(256) {
+            let region = core::ptr::read_volatile(orig_regions_ptr.add(i));
+            MEMORY_REGIONS_COPY[i].write(region);
+        }
+
+        // Update the pointer to point to our copy
+        let new_regions_ptr = core::ptr::addr_of_mut!(MEMORY_REGIONS_COPY) as *mut MaybeUninit<MemoryRegion> as *mut MemoryRegion;
+
+        // Now get pointer to the COPY's memory_regions field to write the new values
+        let boot_info_copy_ptr = core::ptr::addr_of_mut!(BOOT_INFO_COPY) as *mut u8;
+        let copy_mem_regions_ptr = boot_info_copy_ptr.add(mem_regions_offset);
+
+        // Write new ptr field (at offset 0 in MemoryRegions)
+        (copy_mem_regions_ptr as *mut *mut MemoryRegion).write_volatile(new_regions_ptr);
+        // Write len field (at offset 8 on x86_64)
+        (copy_mem_regions_ptr.add(core::mem::size_of::<*mut MemoryRegion>()) as *mut usize).write_volatile(regions_len);
+
+        // Get raw pointer without creating any reference - this bypasses Rust's validation
+        let boot_info_raw_ptr = core::ptr::addr_of!(BOOT_INFO_COPY) as *const BootInfo;
+
+        // Output 'I' after BootInfo copy
+        core::arch::asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x49",
+            "out dx, al",
+            options(nomem, nostack, preserves_flags)
+        );
+
+        _rust_start_impl(cpuid, boot_info_raw_ptr, boot_ticks)
+    }
 }
 
-fn _rust_start_impl(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) -> ! {
-    // Early serial probe: write 'R' (0x52) to COM1 (0x3F8) to confirm entry
+fn _rust_start_impl(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) -> ! {
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        core::arch::asm!(
-            "mov dx, 0x3F8\n\
-             mov al, 0x52\n\
-             out dx, al",
-            options(nomem, nostack, preserves_flags)
-        );
-    }
+    unsafe { serial_out(b'1'); }  // Marker 1 - start of _rust_start_impl
 
-    // Debug: output 'H' before panic hook setup
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        core::arch::asm!(
-            "mov dx, 0x3F8\n\
-             mov al, 0x48\n\
-             out dx, al",
-            options(nomem, nostack, preserves_flags)
-        );
-    }
+    unsafe { serial_out(b'2'); }  // Before panic hook setup
 
     // Set up panic hook
     // FIXME: Temporarily disable panic hook on x86_64 as it requires TLS which isn't set up yet
@@ -182,9 +301,6 @@ fn _rust_start_impl(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64)
     panic_unwind2::set_hook(|info| {
         tracing::error!("CPU {info}");
 
-        // FIXME 32 seems adequate for unoptimized builds where the callstack can get quite deep
-        //  but (at least at the moment) is absolute overkill for optimized builds. Sadly there
-        //  is no good way to do conditional compilation based on the opt-level.
         const MAX_BACKTRACE_FRAMES: usize = 32;
 
         let backtrace = backtrace::__rust_end_short_backtrace(|| {
@@ -197,31 +313,11 @@ fn _rust_start_impl(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64)
         }
     });
 
-    // Debug: output 'U' after panic hook setup (or skip on x86_64)
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        core::arch::asm!(
-            "mov dx, 0x3F8\n\
-             mov al, 0x55\n\
-             out dx, al",
-            options(nomem, nostack, preserves_flags)
-        );
-    }
+    unsafe { serial_out(b'3'); }  // After panic hook setup
 
-    // Unwinding expects at least one landing pad in the callstack, but capturing all unwinds that
-    // bubble up to this point is also a good idea since we can perform some last cleanup and
-    // print an error message.
-
-    // Debug: output 'C' before catch_unwind
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        core::arch::asm!(
-            "mov dx, 0x3F8\n\
-             mov al, 0x43\n\
-             out dx, al",
-            options(nomem, nostack, preserves_flags)
-        );
-    }
+    unsafe { serial_out(b'4'); }  // Before FORCE_EARLY_CONSOLE check
 
     // EARLY FORCE CONSOLE: drop into a minimal blocking serial shell immediately.
     // This bypasses all heavy init to guarantee an interactive prompt when debugging
@@ -229,7 +325,11 @@ fn _rust_start_impl(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64)
     const FORCE_EARLY_CONSOLE: bool = false;
 
     #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'5'); }  // FORCE_EARLY_CONSOLE check (should be false)
+
+    #[cfg(target_arch = "x86_64")]
     if FORCE_EARLY_CONSOLE {
+        unsafe { serial_out(b'E'); }  // Entering early console
         // Minimal COM1 init
         const COM1_BASE: u16 = 0x3F8;
         const DATA_REG: u16 = COM1_BASE + 0;
@@ -325,6 +425,9 @@ fn _rust_start_impl(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64)
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'6'); }  // After early console block (should be skipped)
+
     // Enable panic unwinding
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -346,34 +449,46 @@ fn _rust_start_impl(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64)
     // FIXME: On x86_64, skip panic unwinding for now until TLS is properly set up
     #[cfg(target_arch = "x86_64")]
     {
-        kmain(cpuid, boot_info, boot_ticks);
+        unsafe { serial_out(b'7'); }  // About to call kmain
+        kmain(cpuid, boot_info_ptr, boot_ticks);
+        unsafe { serial_out(b'8'); }  // Returned from kmain (shouldn't happen)
         arch::exit(0);
     }
 }
 
-fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
+fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
     // Enter kmain
-    boot_marker(b'K');  // Entered kmain
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'K'); }  // Entered kmain
+
+    // Create a reference from the raw pointer - safe now that we're past early boot
+    let boot_info: &'static BootInfo = unsafe { &*boot_info_ptr };
 
     // perform EARLY per-cpu, architecture-specific initialization
     // (e.g. resetting the FPU)
     arch::per_cpu_init_early();
-    boot_marker(b'k');  // After per_cpu_init_early
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'k'); }  // After per_cpu_init_early
 
     tracing::per_cpu_init_early(cpuid);
-    boot_marker(b'T');  // After tracing per_cpu_init_early
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'T'); }  // After tracing per_cpu_init_early
 
     // after tracing::per_cpu_init_early
 
     // before locate_device_tree
 
-    boot_marker(b'D');  // Before locate_device_tree
-    let (fdt, fdt_region_phys) = locate_device_tree(boot_info);
-    boot_marker(b'd');  // After locate_device_tree
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'D'); }  // Before locate_device_tree
+    let (fdt, fdt_region_phys) = locate_device_tree(boot_info_ptr);
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'd'); }  // After locate_device_tree
 
     // after locate_device_tree
 
     // before RNG creation
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'G'); }  // Before RNG
 
     // FIXME: For now, use a hardcoded seed on x86_64 if boot_info seed might be invalid
     #[cfg(target_arch = "x86_64")]
@@ -382,31 +497,61 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
     #[cfg(not(target_arch = "x86_64"))]
     let mut rng = ChaCha20Rng::from_seed(boot_info.rng_seed);
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'g'); }  // After RNG
+
     // before try_init_global
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'I'); }  // Before try_init_global
 
     let global = state::try_init_global(|| {
-        // set up the basic functionality of the tracing subsystem as early as possible
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'i'); }  // Inside try_init_global
 
+        // set up the basic functionality of the tracing subsystem as early as possible
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'E'); }  // Before tracing::init_early
+
+        #[cfg(not(target_arch = "x86_64"))]
         tracing::init_early();
-        // after init_early
+
+        // FIXME: Skip tracing::init_early on x86_64 as it causes TLS issues
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'e'); }  // After tracing::init_early (skipped on x86_64)
 
         // initialize a simple bump allocator for allocating memory before our virtual memory subsystem
         // is available
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'M'); }  // Before allocatable_memory_regions
+
         let allocatable_memories = allocatable_memory_regions(boot_info);
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'm'); }  // After allocatable_memory_regions
 
         // Skip tracing on x86_64 until fully initialized
         #[cfg(not(target_arch = "x86_64"))]
         tracing::info!("allocatable memories: {:?}", allocatable_memories);
 
         #[cfg(target_arch = "x86_64")]
-        boot_marker(b'A');  // After allocatable memories
+        unsafe { serial_out(b'A'); }  // After allocatable memories
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'B'); }  // Before BootstrapAllocator::new
 
         let mut boot_alloc = BootstrapAllocator::new(&allocatable_memories);
-        // after boot_alloc new
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'b'); }  // After BootstrapAllocator::new
 
         // initializing the global allocator
-        // before allocator::init
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'C'); }  // Before allocator::init
+
         allocator::init(&mut boot_alloc, boot_info);
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'c'); }  // After allocator::init
 
         // after allocator::init
 
@@ -614,6 +759,9 @@ fn kmain(cpuid: usize, boot_info: &'static BootInfo, boot_ticks: u64) {
 /// sorted and might not be optimally "packed". This function will both sort regions and
 /// attempt to compact the list by merging adjacent regions.
 fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAddress>, 16> {
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'['); }  // Enter function
+
     // On x86_64, restrict usable regions to the portion of physical memory that
     // is already covered by the loader-provided physmap to avoid early page faults
     // when touching bookkeeping pages before VM is fully initialized.
@@ -624,6 +772,83 @@ fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAd
         .checked_sub(boot_info.physical_memory_map.start)
         .unwrap();
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b']'); }  // After physmap calc
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'{'); }  // Before accessing memory_regions
+
+    #[cfg(target_arch = "x86_64")]
+    let _test = boot_info.memory_regions.len();
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'}'); }  // After len()
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'@'); }  // Before creating ArrayVec
+
+    #[cfg(target_arch = "x86_64")]
+    let temp_test: ArrayVec<Range<PhysicalAddress>, 16> = ArrayVec::new();
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'#'); }  // After creating empty ArrayVec
+
+    // x86_64: Check slice pointer
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        let ptr = boot_info.memory_regions.as_ptr() as usize;
+        serial_out(b'P');  // Slice pointer check
+        // Try to read first byte of the slice data
+        let _first_byte = core::ptr::read_volatile(ptr as *const u8);
+        serial_out(b'p');  // After reading first byte
+    }
+
+    // x86_64: Manually iterate to avoid iterator trait issues
+    #[cfg(target_arch = "x86_64")]
+    let mut temp: ArrayVec<Range<PhysicalAddress>, 16> = {
+        let mut arr = ArrayVec::new();
+        unsafe { serial_out(b'F'); }  // Before for loop
+        for region in &boot_info.memory_regions[..] {
+            unsafe { serial_out(b'f'); }  // Inside for loop
+            if !region.kind.is_usable() {
+                continue;
+            }
+
+            let mut start = PhysicalAddress::new(region.range.start);
+            let mut end = PhysicalAddress::new(region.range.end);
+
+            // Clamp to physmap [0, physmap_size)
+            if start.get() >= physmap_size {
+                continue;
+            }
+            if end.get() > physmap_size {
+                end = PhysicalAddress::new(physmap_size);
+            }
+
+            // Round boundaries to page granularity
+            let aligned_start = match start.checked_align_up(arch::PAGE_SIZE) {
+                Some(addr) => addr,
+                None => continue,
+            };
+            let aligned_end = end.align_down(arch::PAGE_SIZE);
+
+            if aligned_start >= aligned_end {
+                continue;
+            }
+
+            arr.push(Range::from(aligned_start..aligned_end));
+        }
+        unsafe { serial_out(b'L'); }  // After for loop
+        arr
+    };
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'l'); }  // After temp assignment
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'S'); }  // Before sort block
+
+    #[cfg(not(target_arch = "x86_64"))]
     let mut temp: ArrayVec<Range<PhysicalAddress>, 16> = boot_info
         .memory_regions
         .iter()
@@ -666,21 +891,56 @@ fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAd
     // complex merging that may touch unmapped bookkeeping.
     #[cfg(target_arch = "x86_64")]
     {
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b's'); }  // Entering sort block
+
         // Keep the top 8 largest regions to progressively reintroduce multiple arenas
+        // Use selection sort to avoid heap allocation during early boot
         if !temp.is_empty() {
-            let mut v: alloc::vec::Vec<_> = temp.into_iter().collect();
-            v.sort_by_key(|r| core::cmp::Reverse(r.size()));
-            v.truncate(8);
-            let mut arr = ArrayVec::<Range<PhysicalAddress>, 16>::new();
-            for r in v { arr.push(r); }
-            temp = arr;
+            #[cfg(target_arch = "x86_64")]
+            unsafe { serial_out(b'1'); }
+
+            let len = temp.len();
+            // Selection sort by size (descending)
+            for i in 0..len.saturating_sub(1) {
+                let mut max_idx = i;
+                for j in (i + 1)..len {
+                    if temp[j].size() > temp[max_idx].size() {
+                        max_idx = j;
+                    }
+                }
+                if max_idx != i {
+                    temp.swap(i, max_idx);
+                }
+            }
+
+            #[cfg(target_arch = "x86_64")]
+            unsafe { serial_out(b'2'); }
+
+            // Truncate to top 8
+            temp.truncate(8);
+
+            #[cfg(target_arch = "x86_64")]
+            unsafe { serial_out(b'3'); }
         }
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'4'); }
     }
 
     // merge adjacent regions
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'O'); }  // Before merge
+
     let mut out: ArrayVec<Range<PhysicalAddress>, 16> = ArrayVec::new();
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'o'); }  // After out creation
+
     'outer: for region in temp {
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'r'); }  // Each region
+
         for other in &mut out {
             if region.start == other.end {
                 other.end = region.end;
@@ -695,24 +955,101 @@ fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAd
         out.push(region);
     }
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'R'); }  // After merge loop
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'X'); }  // Before return
+
     out
 }
 
-fn locate_device_tree(boot_info: &BootInfo) -> (&'static [u8], Range<PhysicalAddress>) {
+fn locate_device_tree(boot_info_ptr: *const BootInfo) -> (&'static [u8], Range<PhysicalAddress>) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'F'); }  // Start of locate_device_tree
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'G'); }  // Before iterator
+
+    // For the x86_64 path, manually read from raw pointer to avoid validation issues
+    // For other code paths after the critical memory_regions access, create a reference
+    #[cfg(target_arch = "x86_64")]
+    let fdt = unsafe {
+        use core::ptr;
+        use loader_api::MemoryRegion;
+
+        serial_out(b'g'); // Before reading ptr/len
+
+        // Read ptr and len from MemoryRegions using raw byte access from boot_info_ptr
+        // memory_regions is at offset 8 (after cpu_mask which is usize = 8 bytes)
+        let boot_info_bytes = boot_info_ptr as *const u8;
+        let mem_regions_ptr = boot_info_bytes.add(core::mem::size_of::<usize>());
+        let regions_ptr = (mem_regions_ptr as *const *mut MemoryRegion).read_volatile();
+        let regions_len = (mem_regions_ptr.add(core::mem::size_of::<*mut MemoryRegion>()) as *const usize).read_volatile();
+
+        serial_out(b'h'); // After reading ptr/len, before loop
+
+        // Debug: print regions_ptr and regions_len values
+        serial_out(b'P'); // Before printing pointer
+        crate::allocator::print_u64_hex(regions_ptr as u64);
+        serial_out(b' ');
+        crate::allocator::print_u64_hex(regions_len as u64);
+        serial_out(b'\n');
+        serial_out(b'p'); // After printing pointer
+
+        // Manually iterate to find FDT region using volatile reads
+        let mut fdt_region_copy: Option<MemoryRegion> = None;
+        for i in 0..regions_len {
+            serial_out(b'i'); // Inside loop iteration
+            let region_ptr = regions_ptr.add(i);
+            // Use read_volatile instead of creating a reference
+            let region = ptr::read_volatile(region_ptr);
+
+            if region.kind == MemoryRegionKind::FDT {
+                fdt_region_copy = Some(region);
+                serial_out(b'j'); // Found FDT
+                break;
+            }
+        }
+
+        serial_out(b'k'); // After loop
+
+        fdt_region_copy.expect("no FDT region")
+    };
+
+    // For non-x86_64, create a reference from the pointer
+    #[cfg(not(target_arch = "x86_64"))]
+    let boot_info: &BootInfo = unsafe { &*boot_info_ptr };
+
+    #[cfg(not(target_arch = "x86_64"))]
     let fdt = boot_info
         .memory_regions
         .iter()
         .find(|region| region.kind == MemoryRegionKind::FDT)
         .expect("no FDT region");
 
+    // Create a reference from the pointer for the rest of the function
+    // This is safe now that we're past the critical early boot memory_regions access
+    let boot_info: &BootInfo = unsafe { &*boot_info_ptr };
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'H'); }  // After find, before base calc
+
     let base = boot_info
         .physical_address_offset
         .checked_add(fdt.range.start)
         .unwrap() as *const u8;
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'I'); }  // After base calc, before slice
+
     // Safety: we need to trust the bootinfo data is correct
     let slice =
         unsafe { slice::from_raw_parts(base, fdt.range.end.checked_sub(fdt.range.start).unwrap()) };
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'J'); }  // After slice, before return
+
     (
         slice,
         Range::from(PhysicalAddress::new(fdt.range.start)..PhysicalAddress::new(fdt.range.end)),

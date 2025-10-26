@@ -11,7 +11,7 @@ pub mod device;
 mod mem;
 mod setjmp_longjmp;
 pub mod state;
-mod trap_handler;
+pub mod trap_handler;
 
 use core::arch::asm;
 
