@@ -9,6 +9,7 @@ use core::ops::{Deref, DerefMut};
 use core::range::Range;
 use core::{fmt, slice};
 
+#[repr(C)]
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct BootInfo {

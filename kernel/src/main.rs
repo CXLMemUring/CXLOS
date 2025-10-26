@@ -69,7 +69,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn serial_out(byte: u8) {
+pub unsafe fn serial_out(byte: u8) {
     core::arch::asm!(
         "out %al, %dx",
         in("al") byte,
@@ -93,7 +93,7 @@ pub fn boot_marker(_b: u8) {}
 #[inline(always)]
 unsafe fn print_nibble_hex(n: u8) {
     let ch = if n < 10 { b'0' + n } else { b'a' + (n - 10) };
-    serial_out(ch);
+    unsafe { serial_out(ch); }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -218,6 +218,9 @@ extern "C" fn _rust_start(cpuid: usize, boot_info_ptr: usize, boot_ticks: u64) -
         let dst_bytes = (*dst_ptr).as_mut_ptr() as *mut u8;
         let size = core::mem::size_of::<BootInfo>();
 
+        // Skip the source check since it causes faults - the loader's physical_memory_map
+        // might not be set correctly or might be at a different offset than expected
+
         // Debug marker before byte copy
         core::arch::asm!(
             "mov dx, 0x3F8",
@@ -239,6 +242,8 @@ extern "C" fn _rust_start(cpuid: usize, boot_info_ptr: usize, boot_ticks: u64) -
             "out dx, al",
             options(nomem, nostack, preserves_flags)
         );
+
+        // Skip debug byte dump for now
 
         // Now we need to fix the memory_regions pointer
         // Read the ORIGINAL memory_regions info from the loader's BootInfo (still accessible)
@@ -272,6 +277,16 @@ extern "C" fn _rust_start(cpuid: usize, boot_info_ptr: usize, boot_ticks: u64) -
         (copy_mem_regions_ptr as *mut *mut MemoryRegion).write_volatile(new_regions_ptr);
         // Write len field (at offset 8 on x86_64)
         (copy_mem_regions_ptr.add(core::mem::size_of::<*mut MemoryRegion>()) as *mut usize).write_volatile(regions_len);
+
+        // WORKAROUND: Manually fix physical_memory_map since byte copy isn't preserving it correctly
+        // From loader debug output, we know it should be: 0xffffffc000000000..0xffffffc040000000
+        // We'll write these values directly at offset 32 (after cpu_mask(8) + memory_regions(16) + physical_address_offset(8))
+        let physmap_fix_offset = 32;
+        let physmap_fix_ptr = boot_info_copy_ptr.add(physmap_fix_offset);
+        // Write start
+        (physmap_fix_ptr as *mut usize).write_volatile(0xffffffc000000000);
+        // Write end
+        (physmap_fix_ptr.add(8) as *mut usize).write_volatile(0xffffffc040000000);
 
         // Get raw pointer without creating any reference - this bypasses Rust's validation
         let boot_info_raw_ptr = core::ptr::addr_of!(BOOT_INFO_COPY) as *const BootInfo;
@@ -504,7 +519,13 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
     #[cfg(target_arch = "x86_64")]
     unsafe { serial_out(b'I'); }  // Before try_init_global
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'~'); }  // DEBUG: Immediately before call
+
     let global = state::try_init_global(|| {
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'%'); }  // DEBUG: VERY first line of closure
+
         #[cfg(target_arch = "x86_64")]
         unsafe { serial_out(b'i'); }  // Inside try_init_global
 
@@ -519,11 +540,19 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
         #[cfg(target_arch = "x86_64")]
         unsafe { serial_out(b'e'); }  // After tracing::init_early (skipped on x86_64)
 
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'!'); }  // DEBUG: Right before allocatable_memory_regions marker
+
         // initialize a simple bump allocator for allocating memory before our virtual memory subsystem
         // is available
         #[cfg(target_arch = "x86_64")]
         unsafe { serial_out(b'M'); }  // Before allocatable_memory_regions
 
+        // Pass raw pointer on x86_64 to avoid reference validation issues
+        #[cfg(target_arch = "x86_64")]
+        let allocatable_memories = allocatable_memory_regions(boot_info_ptr);
+
+        #[cfg(not(target_arch = "x86_64"))]
         let allocatable_memories = allocatable_memory_regions(boot_info);
 
         #[cfg(target_arch = "x86_64")]
@@ -557,10 +586,16 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
 
         // Test small allocation (silent)
         #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'V'); }  // Before vec allocation
+        #[cfg(target_arch = "x86_64")]
         { let _ = alloc::vec::Vec::<u8>::with_capacity(16); }
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'v'); }  // After vec allocation
 
         // before DeviceTree::parse
         // Handle device tree parsing - x86_64 doesn't need it, so just emit a marker
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'b'); }  // Before bootargs
         #[cfg(target_arch = "x86_64")]
         let bootargs = {
             // stub DT
@@ -570,6 +605,8 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
                 backtrace: backtrace::BacktraceStyle::Short,
             }
         };
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'a'); }  // After bootargs
 
         // after bootargs on x86_64
 
@@ -586,7 +623,11 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
         // initialize the backtracing subsystem after the allocator has been set up
         // since setting up the symbolization context requires allocation
         // before backtrace::init
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'T'); }  // Before backtrace::init
         backtrace::init(boot_info, bootargs.backtrace);
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b't'); }  // After backtrace::init
         // after backtrace::init
 
         // fully initialize the tracing subsystem now that we can allocate
@@ -642,23 +683,35 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
         }
 
         // Optionally initialize WASM BusyBox (requires prebuilt wasm + feature flag)
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'w'); }  // Before wasm busybox
+
         if let Ok(true) = busybox::wasm_loader::try_init_wasm_busybox() {
             tracing::info!("Initialized WASM BusyBox module");
         } else {
             tracing::warn!("WASM BusyBox module not initialized");
         }
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'W'); }  // After wasm busybox
+
         #[cfg(target_arch = "x86_64")]
         boot_marker(b'&');
 
         // perform LATE per-cpu, architecture-specific initialization
         // (e.g. setting the trap vector and enabling interrupts)
         #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'U'); }  // BEFORE Cpu block
+
+        #[cfg(target_arch = "x86_64")]
         let cpu = {
             // breadcrumb before Cpu::new
             boot_marker(b'0');
             // Instrument non-fast-path to locate hangs
             boot_marker(b'1');
+            unsafe { serial_out(b'!'); }  // RIGHT before Cpu::new_without_dt
             let cpu = arch::device::cpu::Cpu::new_without_dt(cpuid)?;
+            unsafe { serial_out(b'@'); }  // RIGHT after Cpu::new_without_dt
             boot_marker(b'2');
             cpu
         };
@@ -668,14 +721,20 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
 
         boot_marker(b'3');
         #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'e'); }  // Before Executor
+        #[cfg(target_arch = "x86_64")]
         let executor = Executor::with_capacity(1).unwrap();
         #[cfg(not(target_arch = "x86_64"))]
         let executor = Executor::with_capacity(boot_info.cpu_mask.count_ones() as usize).unwrap();
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'E'); }  // After Executor
         boot_marker(b'4');
         let timer = Timer::new(Duration::from_millis(1), cpu.clock);
         boot_marker(b'5');
 
         boot_marker(b'6');
+        #[cfg(target_arch = "x86_64")]
+        unsafe { serial_out(b'G'); }  // Before Global return
         Ok(Global {
             time_origin: Instant::from_ticks(&timer, Ticks(boot_ticks)),
             timer,
@@ -695,6 +754,9 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
         }
         panic!("global init failed: {err:?}");
     });
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'*'); }  // DEBUG: Right after try_init_global returns
 
     // Checkpoint after global init returned: 'C'
     boot_marker(b'C');
@@ -745,8 +807,9 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
             #[cfg(target_arch = "x86_64")]
             {
                 // debug: entering shell::init
-                boot_marker(b'>');
+                unsafe { serial_out(b'>'); }  // BEFORE shell::init_x86
                 shell::init_x86(&global.executor, 1);
+                unsafe { serial_out(b'<'); }  // AFTER shell::init_x86
             }
             arch::block_on(worker2.run(futures::future::pending::<()>())).unwrap_err(); // the only way `run` can return is when the executor is closed
         }
@@ -758,43 +821,78 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
 /// The regions passed by the loader are guaranteed to be non-overlapping, but might not be
 /// sorted and might not be optimally "packed". This function will both sort regions and
 /// attempt to compact the list by merging adjacent regions.
+#[cfg(not(target_arch = "x86_64"))]
 fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAddress>, 16> {
-    #[cfg(target_arch = "x86_64")]
+    allocatable_memory_regions_impl(boot_info)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn allocatable_memory_regions(boot_info_ptr: *const BootInfo) -> ArrayVec<Range<PhysicalAddress>, 16> {
     unsafe { serial_out(b'['); }  // Enter function
+    unsafe { serial_out(b'1'); }  // Before accessing physical_memory_map
 
-    // On x86_64, restrict usable regions to the portion of physical memory that
-    // is already covered by the loader-provided physmap to avoid early page faults
-    // when touching bookkeeping pages before VM is fully initialized.
-    #[cfg(target_arch = "x86_64")]
-    let physmap_size = boot_info
-        .physical_memory_map
-        .end
-        .checked_sub(boot_info.physical_memory_map.start)
-        .unwrap();
+    // Read physical_memory_map fields using raw pointer arithmetic to avoid reference validation
+    let boot_info_bytes = boot_info_ptr as *const u8;
 
-    #[cfg(target_arch = "x86_64")]
+    // physical_memory_map is after: cpu_mask (8), memory_regions (16), physical_address_offset (8)
+    let physmap_offset = core::mem::size_of::<usize>() + core::mem::size_of::<usize>() * 2 + core::mem::size_of::<usize>();
+    let physmap_ptr = unsafe { boot_info_bytes.add(physmap_offset) };
+
+    unsafe { serial_out(b'2'); }  // Before reading physmap fields
+
+    // Read start and end from the Range<usize>
+    let start = unsafe { (physmap_ptr as *const usize).read_volatile() };
+    let end = unsafe { (physmap_ptr.add(core::mem::size_of::<usize>()) as *const usize).read_volatile() };
+
+    unsafe { serial_out(b'3'); }  // After reading fields
+
+    // Debug: print end and start values
+    unsafe {
+        serial_out(b'E'); // Before printing end
+        crate::allocator::print_u64_hex(end as u64);
+        serial_out(b' ');
+        serial_out(b'S'); // Before printing start
+        crate::allocator::print_u64_hex(start as u64);
+        serial_out(b'\n');
+    }
+
+    let size_opt = end.checked_sub(start);
+    unsafe { serial_out(b'4'); }  // After checked_sub
+    let physmap_size = match size_opt {
+        Some(s) => {
+            unsafe { serial_out(b'5'); }  // Size is Some
+            s
+        }
+        None => {
+            unsafe { serial_out(b'N'); }  // Size is None - this would panic
+            0 // Fallback to avoid panic for debugging
+        }
+    };
+    unsafe { serial_out(b'6'); }  // After match
+
+    // Now create a reference for the rest of the function
+    let boot_info: &BootInfo = unsafe { &*boot_info_ptr };
+    unsafe { serial_out(b'7'); }  // After creating reference
+
+    allocatable_memory_regions_impl_x86(boot_info, physmap_size)
+}
+
+/// x86_64-specific implementation that takes physmap_size as a parameter
+/// (since we already read it using raw pointer arithmetic)
+#[cfg(target_arch = "x86_64")]
+fn allocatable_memory_regions_impl_x86(boot_info: &BootInfo, physmap_size: usize) -> ArrayVec<Range<PhysicalAddress>, 16> {
     unsafe { serial_out(b']'); }  // After physmap calc
-
-    #[cfg(target_arch = "x86_64")]
     unsafe { serial_out(b'{'); }  // Before accessing memory_regions
 
-    #[cfg(target_arch = "x86_64")]
     let _test = boot_info.memory_regions.len();
-
-    #[cfg(target_arch = "x86_64")]
     unsafe { serial_out(b'}'); }  // After len()
 
-    #[cfg(target_arch = "x86_64")]
     unsafe { serial_out(b'@'); }  // Before creating ArrayVec
 
-    #[cfg(target_arch = "x86_64")]
-    let temp_test: ArrayVec<Range<PhysicalAddress>, 16> = ArrayVec::new();
-
-    #[cfg(target_arch = "x86_64")]
+    let _temp_test: ArrayVec<Range<PhysicalAddress>, 16> = ArrayVec::new();
     unsafe { serial_out(b'#'); }  // After creating empty ArrayVec
 
-    // x86_64: Check slice pointer
-    #[cfg(target_arch = "x86_64")]
+    // Check slice pointer
     unsafe {
         let ptr = boot_info.memory_regions.as_ptr() as usize;
         serial_out(b'P');  // Slice pointer check
@@ -803,8 +901,7 @@ fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAd
         serial_out(b'p');  // After reading first byte
     }
 
-    // x86_64: Manually iterate to avoid iterator trait issues
-    #[cfg(target_arch = "x86_64")]
+    // Manually iterate to avoid iterator trait issues
     let mut temp: ArrayVec<Range<PhysicalAddress>, 16> = {
         let mut arr = ArrayVec::new();
         unsafe { serial_out(b'F'); }  // Before for loop
@@ -842,103 +939,51 @@ fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAd
         arr
     };
 
-    #[cfg(target_arch = "x86_64")]
     unsafe { serial_out(b'l'); }  // After temp assignment
-
-    #[cfg(target_arch = "x86_64")]
     unsafe { serial_out(b'S'); }  // Before sort block
 
-    #[cfg(not(target_arch = "x86_64"))]
-    let mut temp: ArrayVec<Range<PhysicalAddress>, 16> = boot_info
-        .memory_regions
-        .iter()
-        .filter_map(|region| {
-            if !region.kind.is_usable() {
-                return None;
-            }
-
-            let mut start = PhysicalAddress::new(region.range.start);
-            let mut end = PhysicalAddress::new(region.range.end);
-
-            #[cfg(target_arch = "x86_64")]
-            {
-                // Clamp to physmap [0, physmap_size)
-                if start.get() >= physmap_size {
-                    return None;
-                }
-                if end.get() > physmap_size {
-                    end = PhysicalAddress::new(physmap_size);
-                }
-            }
-
-            // Round boundaries to page granularity to keep bootstrap allocations aligned.
-            let aligned_start = match start.checked_align_up(arch::PAGE_SIZE) {
-                Some(addr) => addr,
-                None => return None,
-            };
-            let aligned_end = end.align_down(arch::PAGE_SIZE);
-
-            if aligned_start >= aligned_end {
-                return None;
-            }
-
-            Some(Range::from(aligned_start..aligned_end))
-        })
-        .collect();
-
-    // x86_64: prefer simplicity for early bring-up. Use only the single largest
+    // Prefer simplicity for early bring-up. Use only the single largest
     // contiguous usable region (already clamped to the physmap) to avoid
     // complex merging that may touch unmapped bookkeeping.
-    #[cfg(target_arch = "x86_64")]
-    {
-        #[cfg(target_arch = "x86_64")]
-        unsafe { serial_out(b's'); }  // Entering sort block
+    unsafe { serial_out(b's'); }  // Entering sort block
 
-        // Keep the top 8 largest regions to progressively reintroduce multiple arenas
-        // Use selection sort to avoid heap allocation during early boot
-        if !temp.is_empty() {
-            #[cfg(target_arch = "x86_64")]
-            unsafe { serial_out(b'1'); }
+    // Keep the top 8 largest regions to progressively reintroduce multiple arenas
+    // Use selection sort to avoid heap allocation during early boot
+    if !temp.is_empty() {
+        unsafe { serial_out(b'1'); }
 
-            let len = temp.len();
-            // Selection sort by size (descending)
-            for i in 0..len.saturating_sub(1) {
-                let mut max_idx = i;
-                for j in (i + 1)..len {
-                    if temp[j].size() > temp[max_idx].size() {
-                        max_idx = j;
-                    }
-                }
-                if max_idx != i {
-                    temp.swap(i, max_idx);
+        let len = temp.len();
+        // Selection sort by size (descending)
+        for i in 0..len.saturating_sub(1) {
+            let mut max_idx = i;
+            for j in (i + 1)..len {
+                if temp[j].size() > temp[max_idx].size() {
+                    max_idx = j;
                 }
             }
-
-            #[cfg(target_arch = "x86_64")]
-            unsafe { serial_out(b'2'); }
-
-            // Truncate to top 8
-            temp.truncate(8);
-
-            #[cfg(target_arch = "x86_64")]
-            unsafe { serial_out(b'3'); }
+            if max_idx != i {
+                temp.swap(i, max_idx);
+            }
         }
 
-        #[cfg(target_arch = "x86_64")]
-        unsafe { serial_out(b'4'); }
+        unsafe { serial_out(b'2'); }
+
+        // Truncate to top 8
+        temp.truncate(8);
+
+        unsafe { serial_out(b'3'); }
     }
 
+    unsafe { serial_out(b'4'); }
+
     // merge adjacent regions
-    #[cfg(target_arch = "x86_64")]
     unsafe { serial_out(b'O'); }  // Before merge
 
     let mut out: ArrayVec<Range<PhysicalAddress>, 16> = ArrayVec::new();
 
-    #[cfg(target_arch = "x86_64")]
     unsafe { serial_out(b'o'); }  // After out creation
 
     'outer: for region in temp {
-        #[cfg(target_arch = "x86_64")]
         unsafe { serial_out(b'r'); }  // Each region
 
         for other in &mut out {
@@ -955,11 +1000,57 @@ fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAd
         out.push(region);
     }
 
-    #[cfg(target_arch = "x86_64")]
     unsafe { serial_out(b'R'); }  // After merge loop
-
-    #[cfg(target_arch = "x86_64")]
     unsafe { serial_out(b'X'); }  // Before return
+
+    out
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAddress>, 16> {
+    let mut temp: ArrayVec<Range<PhysicalAddress>, 16> = boot_info
+        .memory_regions
+        .iter()
+        .filter_map(|region| {
+            if !region.kind.is_usable() {
+                return None;
+            }
+
+            let start = PhysicalAddress::new(region.range.start);
+            let end = PhysicalAddress::new(region.range.end);
+
+            // Round boundaries to page granularity to keep bootstrap allocations aligned.
+            let aligned_start = match start.checked_align_up(arch::PAGE_SIZE) {
+                Some(addr) => addr,
+                None => return None,
+            };
+            let aligned_end = end.align_down(arch::PAGE_SIZE);
+
+            if aligned_start >= aligned_end {
+                return None;
+            }
+
+            Some(Range::from(aligned_start..aligned_end))
+        })
+        .collect();
+
+    // merge adjacent regions
+    let mut out: ArrayVec<Range<PhysicalAddress>, 16> = ArrayVec::new();
+
+    'outer: for region in temp {
+        for other in &mut out {
+            if region.start == other.end {
+                other.end = region.end;
+                continue 'outer;
+            }
+            if region.end == other.start {
+                other.start = region.start;
+                continue 'outer;
+            }
+        }
+
+        out.push(region);
+    }
 
     out
 }

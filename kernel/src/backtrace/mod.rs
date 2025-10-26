@@ -14,14 +14,20 @@ use core::{fmt, slice};
 use arrayvec::ArrayVec;
 use fallible_iterator::FallibleIterator;
 use loader_api::BootInfo;
-use spin::OnceLock;
 use symbolize::SymbolizeContext;
 use unwind2::FrameIter;
 
 use crate::backtrace::print::BacktraceFmt;
 use crate::mem::VirtualAddress;
 
+// x86_64 workaround: OnceLock's spinlock hangs during early boot
+#[cfg(not(target_arch = "x86_64"))]
+use spin::OnceLock;
+#[cfg(not(target_arch = "x86_64"))]
 static BACKTRACE_INFO: OnceLock<BacktraceInfo> = OnceLock::new();
+
+#[cfg(target_arch = "x86_64")]
+static mut BACKTRACE_INFO_X86: Option<BacktraceInfo> = None;
 
 #[cfg(all(target_arch = "x86_64", feature = "boot_debug"))]
 #[inline(always)]
@@ -34,18 +40,48 @@ unsafe fn serial_out(byte: u8) {
     );
 }
 
+// Helper function to get backtrace info on x86_64
+#[cfg(target_arch = "x86_64")]
+fn get_backtrace_info() -> Option<&'static BacktraceInfo> {
+    unsafe {
+        let ptr = core::ptr::addr_of!(BACKTRACE_INFO_X86);
+        (*ptr).as_ref()
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn get_backtrace_info() -> Option<&'static BacktraceInfo> {
+    BACKTRACE_INFO.get()
+}
+
 #[cold]
 pub fn init(boot_info: &'static BootInfo, backtrace_style: BacktraceStyle) {
     // debug: 'F' entering backtrace::init
-    #[cfg(all(target_arch = "x86_64", feature = "boot_debug"))]
+    #[cfg(target_arch = "x86_64")]
     unsafe {
-        serial_out(b'F');
+        crate::serial_out(b'F');
     }
-    BACKTRACE_INFO.get_or_init(|| BacktraceInfo::new(boot_info, backtrace_style));
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        BACKTRACE_INFO.get_or_init(|| BacktraceInfo::new(boot_info, backtrace_style));
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        // x86_64 workaround: skip backtrace initialization during early boot
+        // TODO: investigate why BacktraceInfo::new causes null pointer dereferences
+        unsafe {
+            crate::serial_out(b'S');  // Skipping backtrace init
+        }
+        let _ = boot_info;
+        let _ = backtrace_style;
+    }
+
     // debug: 'f' leaving backtrace::init
-    #[cfg(all(target_arch = "x86_64", feature = "boot_debug"))]
+    #[cfg(target_arch = "x86_64")]
     unsafe {
-        serial_out(b'f');
+        crate::serial_out(b'f');
     }
 }
 
@@ -59,7 +95,10 @@ struct BacktraceInfo {
     elf: &'static [u8],
     /// The actual state required for converting addresses into symbols. This is *very* heavy to
     /// compute though, so we only construct it lazily in [`BacktraceInfo::symbolize_context`].
+    #[cfg(not(target_arch = "x86_64"))]
     symbolize_context: OnceLock<SymbolizeContext<'static>>,
+    #[cfg(target_arch = "x86_64")]
+    symbolize_context: core::cell::UnsafeCell<Option<SymbolizeContext<'static>>>,
     backtrace_style: BacktraceStyle,
 }
 
@@ -86,9 +125,9 @@ pub struct Backtrace<'a, const MAX_FRAMES: usize> {
 impl BacktraceInfo {
     fn new(boot_info: &'static BootInfo, backtrace_style: BacktraceStyle) -> Self {
         // debug: '1' entering BacktraceInfo::new
-        #[cfg(all(target_arch = "x86_64", feature = "boot_debug"))]
+        #[cfg(target_arch = "x86_64")]
         unsafe {
-            serial_out(b'1');
+            crate::serial_out(b'1');
         }
         BacktraceInfo {
             kernel_virt_base: boot_info.kernel_virt.start as u64,
@@ -108,29 +147,55 @@ impl BacktraceInfo {
                         .unwrap()
                 } as *const u8;
                 // debug: '2' after computing ELF base
-                #[cfg(all(target_arch = "x86_64", feature = "boot_debug"))]
-                serial_out(b'2');
-                slice::from_raw_parts(
+                #[cfg(target_arch = "x86_64")]
+                crate::serial_out(b'2');
+
+                #[cfg(target_arch = "x86_64")]
+                crate::serial_out(b'3');  // before from_raw_parts
+
+                let result = slice::from_raw_parts(
                     base,
                     boot_info
                         .kernel_phys
                         .end
                         .checked_sub(boot_info.kernel_phys.start)
                         .unwrap(),
-                )
+                );
+
+                #[cfg(target_arch = "x86_64")]
+                crate::serial_out(b'4');  // after from_raw_parts
+
+                result
             },
+            #[cfg(not(target_arch = "x86_64"))]
             symbolize_context: OnceLock::new(),
+            #[cfg(target_arch = "x86_64")]
+            symbolize_context: core::cell::UnsafeCell::new(None),
             backtrace_style,
         }
     }
 
     fn symbolize_context(&self) -> &SymbolizeContext<'static> {
-        self.symbolize_context.get_or_init(|| {
-            tracing::debug!("Setting up symbolize context...");
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            self.symbolize_context.get_or_init(|| {
+                tracing::debug!("Setting up symbolize context...");
 
-            let elf = xmas_elf::ElfFile::new(self.elf).unwrap();
-            SymbolizeContext::new(elf, self.kernel_virt_base).unwrap()
-        })
+                let elf = xmas_elf::ElfFile::new(self.elf).unwrap();
+                SymbolizeContext::new(elf, self.kernel_virt_base).unwrap()
+            })
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            let ptr = self.symbolize_context.get();
+            if (*ptr).is_none() {
+                tracing::debug!("Setting up symbolize context...");
+                let elf = xmas_elf::ElfFile::new(self.elf).unwrap();
+                *ptr = Some(SymbolizeContext::new(elf, self.kernel_virt_base).unwrap());
+            }
+            (*ptr).as_ref().unwrap()
+        }
     }
 }
 
@@ -184,11 +249,10 @@ impl<const MAX_FRAMES: usize> Backtrace<'_, MAX_FRAMES> {
         let frames_omitted = iter.next()?.is_some();
 
         Ok(Self {
-            symbolize_ctx: BACKTRACE_INFO.get().map(|info| info.symbolize_context()),
+            symbolize_ctx: get_backtrace_info().map(|info| info.symbolize_context()),
             frames,
             frames_omitted,
-            style: BACKTRACE_INFO
-                .get()
+            style: get_backtrace_info()
                 .map(|info| info.backtrace_style)
                 .unwrap_or_default(),
         })

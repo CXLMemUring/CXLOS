@@ -141,31 +141,27 @@ pub fn init(devtree: &'static DeviceTree, sched: &'static Executor, num_cpus: us
 // x86_64: variant of init that does not require a DeviceTree reference
 #[cfg(target_arch = "x86_64")]
 pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
-    // Mirror the barrier behavior but force n=1 to avoid waiting for non-existent CPUs
-    use spin::{Barrier, OnceLock};
-    static SYNC: OnceLock<Barrier> = OnceLock::new();
+    // x86_64 workaround: avoid OnceLock spinlock during early boot
+    // Since we're single-threaded at this point, just run directly
     let _ = num_cpus; // not used
-    let barrier = SYNC.get_or_init(|| Barrier::new(1));
 
-    if barrier.wait().is_leader() {
-        unsafe {
-            // Print banner directly to serial as a fallback
-            crate::serial_out(b'\r');
-            crate::serial_out(b'\n');
-            for &b in S.as_bytes() { crate::serial_out(b); }
-            crate::serial_out(b'\r');
-            crate::serial_out(b'\n');
-            let hint = b"type `help` to list available commands\r\n";
-            for &b in hint { crate::serial_out(b); }
-        }
-
-        // spawn a simple polling-based serial console
-        sched
-            .try_spawn(async move {
-                x86_serial_console().await;
-            })
-            .unwrap();
+    unsafe {
+        // Print banner directly to serial as a fallback
+        crate::serial_out(b'\r');
+        crate::serial_out(b'\n');
+        for &b in S.as_bytes() { crate::serial_out(b); }
+        crate::serial_out(b'\r');
+        crate::serial_out(b'\n');
+        let hint = b"type `help` to list available commands\r\n";
+        for &b in hint { crate::serial_out(b); }
     }
+
+    // spawn a simple polling-based serial console
+    sched
+        .try_spawn(async move {
+            x86_serial_console().await;
+        })
+        .unwrap();
 }
 
 fn init_uart(devtree: &DeviceTree) -> (uart_16550::SerialPort, Mmap, u32) {

@@ -406,6 +406,32 @@ extern "C" fn default_trap_handler(frame: &mut TrapFrame) {
                     options(nomem, nostack, preserves_flags)
                 );
             }
+
+            // Output fault address on first 3 page faults
+            if PF_COUNT <= 3 {
+                let mut cr2: u64;
+                core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack));
+
+                // Output "F:" prefix
+                core::arch::asm!("mov dx, 0x3F8; mov al, 0x46; out dx, al", options(nomem, nostack, preserves_flags));
+                core::arch::asm!("mov dx, 0x3F8; mov al, 0x3A; out dx, al", options(nomem, nostack, preserves_flags));
+
+                // Output address in hex (8 bytes, 16 hex digits)
+                for i in (0..16).rev() {
+                    let nibble = ((cr2 >> (i * 4)) & 0xF) as u8;
+                    let ch = if nibble < 10 { b'0' + nibble } else { b'a' + (nibble - 10) };
+                    core::arch::asm!(
+                        "mov dx, 0x3F8",
+                        "mov al, {0}",
+                        "out dx, al",
+                        in(reg_byte) ch,
+                        options(nomem, nostack, preserves_flags)
+                    );
+                }
+
+                // Output space
+                core::arch::asm!("mov dx, 0x3F8; mov al, 0x20; out dx, al", options(nomem, nostack, preserves_flags));
+            }
         }
 
         let mut addr: u64;
