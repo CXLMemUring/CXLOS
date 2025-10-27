@@ -146,15 +146,22 @@ pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
     let _ = num_cpus; // not used
 
     unsafe {
+        crate::serial_out(b'1');  // Entering shell::init_x86
         // Print banner directly to serial as a fallback
         crate::serial_out(b'\r');
         crate::serial_out(b'\n');
+        crate::serial_out(b'2');  // Before banner loop
         for &b in S.as_bytes() { crate::serial_out(b); }
+        crate::serial_out(b'3');  // After banner loop
         crate::serial_out(b'\r');
         crate::serial_out(b'\n');
+        crate::serial_out(b'4');  // Before hint
         let hint = b"type `help` to list available commands\r\n";
         for &b in hint { crate::serial_out(b); }
+        crate::serial_out(b'5');  // After hint
     }
+
+    unsafe { crate::serial_out(b'6'); }  // Before try_spawn
 
     // spawn a simple polling-based serial console
     sched
@@ -162,6 +169,8 @@ pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
             x86_serial_console().await;
         })
         .unwrap();
+
+    unsafe { crate::serial_out(b'7'); }  // After try_spawn
 }
 
 fn init_uart(devtree: &DeviceTree) -> (uart_16550::SerialPort, Mmap, u32) {
