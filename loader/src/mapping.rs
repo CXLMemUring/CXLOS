@@ -898,9 +898,12 @@ fn handle_tls_segment(
     minfo: &MachineInfo,
     phys_off: usize,
 ) -> crate::Result<TlsAllocation> {
-    // For x86_64 TLS variant II, we need extra space before the TLS data for negative offsets
+    // For x86_64 TLS variant II (local-exec), TLS variables are addressed at
+    // negative offsets from the thread pointer (FS base). Ensure we reserve
+    // at least `mem_size` bytes before the thread pointer so the entire TLS
+    // block fits below FS.
     #[cfg(target_arch = "x86_64")]
-    let pre_offset = arch::PAGE_SIZE; // Allocate one page before TLS data for negative offsets
+    let pre_offset = ph.mem_size;
     #[cfg(not(target_arch = "x86_64"))]
     let pre_offset = 0;
 
@@ -1051,34 +1054,29 @@ impl TlsAllocation {
             if self.template.file_size != 0 {
                 #[cfg(target_arch = "x86_64")]
                 {
-                    // On x86_64 TLS variant II, offset 0 is reserved for the self-pointer.
-                    // We skip the first 8 bytes of the template to preserve the self-pointer.
+                    // On x86_64 TLS variant II (local-exec), TLS data lives at
+                    // negative offsets below the thread pointer (FS base).
+                    // Place .tdata immediately below FS, i.e. at
+                    // [FS - file_size, FS).
+                    let dst_begin = region.start - self.template.file_size;
                     log::trace!(
-                        "TLS copy: hart={} src={:#x}+8 -> dst={:#x}+8 size={} (skipping self-pointer)",
+                        "TLS copy: hart={} src={:#x} -> dst={:#x} size={}",
                         hartid,
                         self.template.start_addr,
-                        region.start,
-                        self.template.file_size.saturating_sub(8)
+                        dst_begin,
+                        self.template.file_size
                     );
 
-                    if self.template.file_size > 8 {
-                        let src: &[u8] = slice::from_raw_parts(
-                            (self.template.start_addr + 8) as *const u8,
-                            self.template.file_size - 8,
-                        );
-                        let dst: &mut [u8] = slice::from_raw_parts_mut(
-                            (region.start + 8) as *mut u8,
-                            self.template.file_size - 8,
-                        );
+                    let src: &[u8] =
+                        slice::from_raw_parts(self.template.start_addr as *const u8, self.template.file_size);
+                    let dst: &mut [u8] =
+                        slice::from_raw_parts_mut(dst_begin as *mut u8, self.template.file_size);
 
-                        // Sanity check: destination should be zeroed
-                        debug_assert!(dst.iter().all(|&x| x == 0));
+                    // Sanity check: destination should be zeroed
+                    debug_assert!(dst.iter().all(|&x| x == 0));
 
-                        dst.copy_from_slice(src);
-                        log::trace!("TLS copy complete: hart={}", hartid);
-                    } else {
-                        log::trace!("TLS template <= 8 bytes, only self-pointer needed");
-                    }
+                    dst.copy_from_slice(src);
+                    log::trace!("TLS copy complete: hart={}", hartid);
                 }
                 #[cfg(not(target_arch = "x86_64"))]
                 {
@@ -1116,20 +1114,12 @@ impl TlsAllocation {
 
             // Then zero the BSS section (from file_size to mem_size)
             if self.template.mem_size > self.template.file_size {
-                // On x86_64 variant II, reserve the first 8 bytes for the self-pointer.
-                // If file_size < 8, we must not zero the self-pointer we just wrote.
                 #[cfg(target_arch = "x86_64")]
                 let (bss_start, bss_size) = {
-                    let protected = 8usize;
-                    if self.template.file_size < protected {
-                        let start = region.start + protected;
-                        let size = self.template.mem_size.saturating_sub(protected);
-                        (start, size)
-                    } else {
-                        let start = region.start + self.template.file_size;
-                        let size = self.template.mem_size - self.template.file_size;
-                        (start, size)
-                    }
+                    // Zero [FS - mem_size, FS - file_size)
+                    let start = region.start - self.template.mem_size;
+                    let size = self.template.mem_size - self.template.file_size;
+                    (start, size)
                 };
                 #[cfg(not(target_arch = "x86_64"))]
                 let (bss_start, bss_size) = {

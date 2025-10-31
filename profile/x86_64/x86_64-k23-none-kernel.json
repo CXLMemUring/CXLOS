@@ -11,7 +11,7 @@
   "llvm-target": "x86_64-unknown-none-elf",
   "max-atomic-width": 64,
   "panic-strategy": "unwind",
-  "relocation-model": "pie",
+  "relocation-model": "static",
   "rustc-abi": "x86-softfloat",
   "tls-model": "local-exec",
   "position-independent-executables": true,

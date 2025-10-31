@@ -304,11 +304,7 @@ extern "C" fn _rust_start(cpuid: usize, boot_info_ptr: usize, boot_ticks: u64) -
 }
 
 fn _rust_start_impl(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) -> ! {
-    #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'1'); }  // Marker 1 - start of _rust_start_impl
-
-    #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'2'); }  // Before panic hook setup
+    // start of _rust_start_impl
 
     // Set up panic hook
     // FIXME: Temporarily disable panic hook on x86_64 as it requires TLS which isn't set up yet
@@ -328,19 +324,15 @@ fn _rust_start_impl(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u6
         }
     });
 
-    #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'3'); }  // After panic hook setup
-
-    #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'4'); }  // Before FORCE_EARLY_CONSOLE check
+    // after panic hook setup
+    // before FORCE_EARLY_CONSOLE check
 
     // EARLY FORCE CONSOLE: drop into a minimal blocking serial shell immediately.
     // This bypasses all heavy init to guarantee an interactive prompt when debugging
     // early boot issues on x86_64.
     const FORCE_EARLY_CONSOLE: bool = false;
 
-    #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'5'); }  // FORCE_EARLY_CONSOLE check (should be false)
+    // FORCE_EARLY_CONSOLE check (should be false)
 
     #[cfg(target_arch = "x86_64")]
     if FORCE_EARLY_CONSOLE {
@@ -440,8 +432,7 @@ fn _rust_start_impl(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u6
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'6'); }  // After early console block (should be skipped)
+    // After early console block (should be skipped)
 
     // Enable panic unwinding
     #[cfg(not(target_arch = "x86_64"))]
@@ -464,9 +455,9 @@ fn _rust_start_impl(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u6
     // FIXME: On x86_64, skip panic unwinding for now until TLS is properly set up
     #[cfg(target_arch = "x86_64")]
     {
-        unsafe { serial_out(b'7'); }  // About to call kmain
+        // About to call kmain
         kmain(cpuid, boot_info_ptr, boot_ticks);
-        unsafe { serial_out(b'8'); }  // Returned from kmain (shouldn't happen)
+        // Returned from kmain (shouldn't happen)
         arch::exit(0);
     }
 }
@@ -653,7 +644,7 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
 
         // x86_64: skip heavy memory/fs init to reach shell quickly
         #[cfg(target_arch = "x86_64")]
-        const SKIP_MEM_INIT: bool = false;
+        const SKIP_MEM_INIT: bool = true;
 
         #[cfg(target_arch = "x86_64")]
         if !SKIP_MEM_INIT {

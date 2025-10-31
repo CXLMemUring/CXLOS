@@ -156,9 +156,9 @@ pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
         crate::serial_out(b'\r');
         crate::serial_out(b'\n');
         crate::serial_out(b'4');  // Before hint
-        let hint = b"type `help` to list available commands\r\n";
+        let hint = b"type `help` to list available commands\r\n> ";
         for &b in hint { crate::serial_out(b); }
-        crate::serial_out(b'5');  // After hint
+        crate::serial_out(b'5');  // After hint (prompt is now visible)
     }
 
     unsafe { crate::serial_out(b'6'); }  // Before try_spawn
@@ -217,7 +217,7 @@ fn init_uart(devtree: &DeviceTree) -> (uart_16550::SerialPort, Mmap, u32) {
 }
 
 #[cfg(target_arch = "x86_64")]
-async fn x86_serial_console() {
+pub async fn x86_serial_console() -> ! {
     use alloc::string::String;
 
     use kasync::task::yield_now;
@@ -309,10 +309,23 @@ async fn x86_serial_console() {
         for b in s.bytes() { write_byte(b); }
     }
 
-    // Initialize COM1 then print a startup marker and prompt
+    // Initialize COM1 then print a clear startup pattern
     serial_init();
-    write_byte(b'S'); // console started
-    write_str("\r\n> ");
+
+    // Output VERY distinctive pattern
+    unsafe {
+        crate::serial_out(b'\r');
+        crate::serial_out(b'\n');
+        crate::serial_out(b'=');
+        crate::serial_out(b'=');
+        crate::serial_out(b'=');
+        crate::serial_out(b'=');
+        crate::serial_out(b'=');
+        crate::serial_out(b'\r');
+        crate::serial_out(b'\n');
+    }
+    write_str("CXLOS x86_64 Shell\r\n");
+    write_str("type `help` to list available commands\r\n> ");
 
     let mut line = String::new();
 

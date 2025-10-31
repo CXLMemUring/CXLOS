@@ -130,9 +130,20 @@ pub fn per_cpu_init_late_no_dt(cpuid: usize) -> crate::Result<state::CpuLocal> {
 
 /// Set the thread pointer on the calling cpu to the given address.
 pub fn set_thread_ptr(addr: VirtualAddress) {
-    panic!("x86_64: set_thread_ptr not implemented");
-    // TODO: Implement thread pointer setting for x86_64
-    // On x86_64, this might use the FS or GS segment base
+    // On x86_64, TLS uses the FS segment register
+    // Set FS base using MSR 0xC0000100 (IA32_FS_BASE)
+    const IA32_FS_BASE: u32 = 0xC0000100;
+
+    // Safety: Setting FS base MSR for TLS
+    unsafe {
+        asm!(
+            "wrmsr",
+            in("ecx") IA32_FS_BASE,
+            in("eax") (addr.get() & 0xFFFFFFFF) as u32,  // Low 32 bits
+            in("edx") (addr.get() >> 32) as u32,          // High 32 bits
+            options(nostack, preserves_flags)
+        );
+    }
 }
 
 #[inline]
