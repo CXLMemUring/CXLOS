@@ -758,16 +758,27 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
     let arch_state = arch::per_cpu_init_late(&global.device_tree, cpuid).unwrap();
 
     #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'L'); }  // Before per_cpu_init_late_no_dt
+
+    #[cfg(target_arch = "x86_64")]
     let arch_state = {
+        unsafe { serial_out(b'l'); }  // Inside arch_state block
         let st = arch::per_cpu_init_late_no_dt(cpuid).unwrap();
+        unsafe { serial_out(b'a'); }  // After per_cpu_init_late_no_dt
         boot_marker(b'%');
         st
     };
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'S'); }  // Before init_cpu_local
 
     state::init_cpu_local(CpuLocal {
         id: cpuid,
         arch: arch_state,
     });
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b's'); }  // After init_cpu_local
 
     #[cfg(not(target_arch = "x86_64"))]
     tracing::info!(
@@ -829,7 +840,6 @@ fn allocatable_memory_regions(boot_info: &BootInfo) -> ArrayVec<Range<PhysicalAd
 #[cfg(target_arch = "x86_64")]
 fn allocatable_memory_regions(boot_info_ptr: *const BootInfo) -> ArrayVec<Range<PhysicalAddress>, 16> {
     unsafe { serial_out(b'['); }  // Enter function
-    unsafe { serial_out(b'1'); }  // Before accessing physical_memory_map
 
     // Read physical_memory_map fields using raw pointer arithmetic to avoid reference validation
     let boot_info_bytes = boot_info_ptr as *const u8;
@@ -838,29 +848,13 @@ fn allocatable_memory_regions(boot_info_ptr: *const BootInfo) -> ArrayVec<Range<
     let physmap_offset = core::mem::size_of::<usize>() + core::mem::size_of::<usize>() * 2 + core::mem::size_of::<usize>();
     let physmap_ptr = unsafe { boot_info_bytes.add(physmap_offset) };
 
-    unsafe { serial_out(b'2'); }  // Before reading physmap fields
-
     // Read start and end from the Range<usize>
     let start = unsafe { (physmap_ptr as *const usize).read_volatile() };
     let end = unsafe { (physmap_ptr.add(core::mem::size_of::<usize>()) as *const usize).read_volatile() };
 
-    unsafe { serial_out(b'3'); }  // After reading fields
-
-    // Debug: print end and start values
-    unsafe {
-        serial_out(b'E'); // Before printing end
-        crate::allocator::print_u64_hex(end as u64);
-        serial_out(b' ');
-        serial_out(b'S'); // Before printing start
-        crate::allocator::print_u64_hex(start as u64);
-        serial_out(b'\n');
-    }
-
     let size_opt = end.checked_sub(start);
-    unsafe { serial_out(b'4'); }  // After checked_sub
     let physmap_size = match size_opt {
         Some(s) => {
-            unsafe { serial_out(b'5'); }  // Size is Some
             s
         }
         None => {
@@ -868,11 +862,9 @@ fn allocatable_memory_regions(boot_info_ptr: *const BootInfo) -> ArrayVec<Range<
             0 // Fallback to avoid panic for debugging
         }
     };
-    unsafe { serial_out(b'6'); }  // After match
 
     // Now create a reference for the rest of the function
     let boot_info: &BootInfo = unsafe { &*boot_info_ptr };
-    unsafe { serial_out(b'7'); }  // After creating reference
 
     allocatable_memory_regions_impl_x86(boot_info, physmap_size)
 }
@@ -1060,55 +1052,41 @@ fn locate_device_tree(boot_info_ptr: *const BootInfo) -> (&'static [u8], Range<P
     unsafe { serial_out(b'F'); }  // Start of locate_device_tree
 
     #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b'G'); }  // Before iterator
+    unsafe { serial_out(b'G'); }  // Before FDT search
 
-    // For the x86_64 path, manually read from raw pointer to avoid validation issues
-    // For other code paths after the critical memory_regions access, create a reference
+    // For x86_64, use raw pointer access to avoid reference validation
     #[cfg(target_arch = "x86_64")]
     let fdt = unsafe {
         use core::ptr;
         use loader_api::MemoryRegion;
 
-        serial_out(b'g'); // Before reading ptr/len
-
-        // Read ptr and len from MemoryRegions using raw byte access from boot_info_ptr
-        // memory_regions is at offset 8 (after cpu_mask which is usize = 8 bytes)
+        // Read memory_regions ptr and len (at offset 8: after cpu_mask)
         let boot_info_bytes = boot_info_ptr as *const u8;
         let mem_regions_ptr = boot_info_bytes.add(core::mem::size_of::<usize>());
         let regions_ptr = (mem_regions_ptr as *const *mut MemoryRegion).read_volatile();
         let regions_len = (mem_regions_ptr.add(core::mem::size_of::<*mut MemoryRegion>()) as *const usize).read_volatile();
 
-        serial_out(b'h'); // After reading ptr/len, before loop
+        // Pointer is already virtual, use it directly
+        let regions_ptr_virt = regions_ptr as *const MemoryRegion;
 
-        // Debug: print regions_ptr and regions_len values
-        serial_out(b'P'); // Before printing pointer
-        crate::allocator::print_u64_hex(regions_ptr as u64);
-        serial_out(b' ');
-        crate::allocator::print_u64_hex(regions_len as u64);
-        serial_out(b'\n');
-        serial_out(b'p'); // After printing pointer
-
-        // Manually iterate to find FDT region using volatile reads
+        // Iterate to find FDT region
         let mut fdt_region_copy: Option<MemoryRegion> = None;
         for i in 0..regions_len {
-            serial_out(b'i'); // Inside loop iteration
-            let region_ptr = regions_ptr.add(i);
-            // Use read_volatile instead of creating a reference
+            let region_ptr = regions_ptr_virt.add(i);
             let region = ptr::read_volatile(region_ptr);
 
-            if region.kind == MemoryRegionKind::FDT {
+            // Check for FDT (kind == 2, since MemoryRegionKind::FDT is the third variant)
+            let kind_val = region.kind as u8;
+            if kind_val == 2 {
                 fdt_region_copy = Some(region);
-                serial_out(b'j'); // Found FDT
                 break;
             }
         }
 
-        serial_out(b'k'); // After loop
-
         fdt_region_copy.expect("no FDT region")
     };
 
-    // For non-x86_64, create a reference from the pointer
+    // For non-x86_64, use normal reference
     #[cfg(not(target_arch = "x86_64"))]
     let boot_info: &BootInfo = unsafe { &*boot_info_ptr };
 
@@ -1119,8 +1097,7 @@ fn locate_device_tree(boot_info_ptr: *const BootInfo) -> (&'static [u8], Range<P
         .find(|region| region.kind == MemoryRegionKind::FDT)
         .expect("no FDT region");
 
-    // Create a reference from the pointer for the rest of the function
-    // This is safe now that we're past the critical early boot memory_regions access
+    // Create a reference for the rest of the function
     let boot_info: &BootInfo = unsafe { &*boot_info_ptr };
 
     #[cfg(target_arch = "x86_64")]

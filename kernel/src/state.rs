@@ -28,6 +28,11 @@ cpu_local! {
     static CPU_LOCAL: OnceCell<CpuLocal> = OnceCell::new();
 }
 
+// x86_64 workaround: cpu_local TLS access hangs during early boot
+// Use a simple static mut array indexed by CPU ID
+#[cfg(target_arch = "x86_64")]
+static mut CPU_LOCAL_X86: [Option<CpuLocal>; 4] = [None, None, None, None];
+
 #[derive(Debug)]
 pub struct Global {
     pub executor: Executor,
@@ -75,10 +80,37 @@ where
     }
 }
 
+#[cfg(not(target_arch = "x86_64"))]
 pub fn init_cpu_local(state: CpuLocal) {
     CPU_LOCAL
         .set(state)
         .expect("CPU local state already initialized");
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn init_cpu_local(state: CpuLocal) {
+    // Debug: Entry marker
+    unsafe extern "C" {
+        fn serial_out(b: u8);
+    }
+    unsafe { serial_out(b'1'); }  // Entered init_cpu_local
+
+    unsafe {
+        let cpu_id = state.id;
+        serial_out(b'2'); // Got cpu_id
+        let ptr = core::ptr::addr_of_mut!(CPU_LOCAL_X86);
+        serial_out(b'3'); // Got ptr
+        if cpu_id >= (*ptr).len() {
+            panic!("CPU ID {} out of range", cpu_id);
+        }
+        serial_out(b'4'); // Passed len check
+        if (*ptr)[cpu_id].is_some() {
+            panic!("CPU local state already initialized for CPU {}", cpu_id);
+        }
+        serial_out(b'5'); // Passed is_some check
+        (*ptr)[cpu_id] = Some(state);
+        serial_out(b'6'); // Stored state
+    }
 }
 
 #[cfg(not(target_arch = "x86_64"))]
