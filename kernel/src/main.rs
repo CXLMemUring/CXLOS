@@ -67,15 +67,19 @@ use crate::mem::bootstrap_alloc::BootstrapAllocator;
 use crate::state::{CpuLocal, Global};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+// Export serial_out with C linkage for use in other modules
 #[cfg(target_arch = "x86_64")]
+#[unsafe(no_mangle)]
 #[inline(always)]
-pub unsafe fn serial_out(byte: u8) {
-    core::arch::asm!(
-        "out %al, %dx",
-        in("al") byte,
-        in("dx") 0x3F8u16,
-        options(nostack, preserves_flags, att_syntax)
-    );
+pub unsafe extern "C" fn serial_out(byte: u8) {
+    unsafe {
+        core::arch::asm!(
+            "out %al, %dx",
+            in("al") byte,
+            in("dx") 0x3F8u16,
+            options(nostack, preserves_flags, att_syntax)
+        );
+    }
 }
 
 // Breadcrumb writer for early boot debugging. Enable with `--features boot_debug`.
