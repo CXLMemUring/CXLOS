@@ -794,9 +794,23 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
 
     #[cfg(target_arch = "x86_64")]
     unsafe { serial_out(b'['); }  // Before Worker::new
-    let mut worker2 = Worker::new(&global.executor, FastRand::from_seed(rng.next_u64())).unwrap();
+
+    // TEMPORARY: Skip Worker creation entirely on x86_64 for debugging
     #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b']'); }  // After Worker::new
+    unsafe {
+        serial_out(b'S');  // Skipping worker
+        serial_out(b'K');
+        serial_out(b'I');
+        serial_out(b'P');
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    let mut worker2 = Worker::new(&global.executor, FastRand::from_seed(rng.next_u64())).unwrap();
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b']'); }  // After Worker section (skipped)
+
+    #[cfg(not(target_arch = "x86_64"))]
     boot_marker(b'W');
 
     cfg_if! {
@@ -820,13 +834,18 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
                 unsafe { serial_out(b'>'); }  // BEFORE shell::init_x86
                 shell::init_x86(&global.executor, 1);
                 unsafe { serial_out(b'<'); }  // AFTER shell::init_x86
+
+                // Simple infinite halt loop
+                // The shell task won't actually run without a proper async executor,
+                // but at least we can see the banner
+                unsafe { serial_out(b'{'); }  // Before halt loop
+                loop {
+                    unsafe { core::arch::asm!("hlt"); }
+                }
             }
 
-            #[cfg(target_arch = "x86_64")]
-            unsafe { serial_out(b'{'); }  // Before block_on
+            #[cfg(not(target_arch = "x86_64"))]
             arch::block_on(worker2.run(futures::future::pending::<()>())).unwrap_err(); // the only way `run` can return is when the executor is closed
-            #[cfg(target_arch = "x86_64")]
-            unsafe { serial_out(b'}'); }  // After block_on (should never reach)
         }
     }
 }
