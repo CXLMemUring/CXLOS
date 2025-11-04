@@ -67,6 +67,7 @@ use crate::mem::bootstrap_alloc::BootstrapAllocator;
 use crate::state::{CpuLocal, Global};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+
 // Export serial_out with C linkage for use in other modules
 #[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
@@ -630,6 +631,7 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
         tracing::init(bootargs.log);
         #[cfg(target_arch = "x86_64")]
         {
+        tracing::init(bootargs.log);
             // Defer full tracing on x86_64 until TLS is properly set up
             // For now, just use basic serial output
         }
@@ -648,7 +650,7 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
 
         // x86_64: skip heavy memory/fs init to reach shell quickly
         #[cfg(target_arch = "x86_64")]
-        const SKIP_MEM_INIT: bool = true;
+        const SKIP_MEM_INIT: bool = false;
 
         #[cfg(target_arch = "x86_64")]
         if !SKIP_MEM_INIT {
@@ -795,22 +797,35 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
     #[cfg(target_arch = "x86_64")]
     unsafe { serial_out(b'['); }  // Before Worker::new
 
-    // TEMPORARY: Skip Worker creation entirely on x86_64 for debugging
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        serial_out(b'S');  // Skipping worker
-        serial_out(b'K');
-        serial_out(b'I');
-        serial_out(b'P');
+    unsafe { serial_out(b'1'); }
+
+    let worker_result = Worker::new(&global.executor, FastRand::from_seed(rng.next_u64()));
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { serial_out(b'2'); }
+
+    #[cfg(target_arch = "x86_64")]
+    if worker_result.is_err() {
+        unsafe {
+            serial_out(b'E');
+            serial_out(b'R');
+            serial_out(b'R');
+        }
+        // Worker creation failed - fall back to sync shell with busybox
+        unsafe { serial_out(b'>'); }
+        shell::init_x86(&global.executor, 1);
+        unsafe { serial_out(b'<'); }
+
+        // Call the blocking console with busybox support
+        shell::x86_serial_console_sync();
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
-    let mut worker2 = Worker::new(&global.executor, FastRand::from_seed(rng.next_u64())).unwrap();
+    let mut worker2 = worker_result.unwrap();
 
     #[cfg(target_arch = "x86_64")]
-    unsafe { serial_out(b']'); }  // After Worker section (skipped)
+    unsafe { serial_out(b']'); }  // After Worker::new
 
-    #[cfg(not(target_arch = "x86_64"))]
     boot_marker(b'W');
 
     cfg_if! {
@@ -834,18 +849,16 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
                 unsafe { serial_out(b'>'); }  // BEFORE shell::init_x86
                 shell::init_x86(&global.executor, 1);
                 unsafe { serial_out(b'<'); }  // AFTER shell::init_x86
-
-                // Simple infinite halt loop
-                // The shell task won't actually run without a proper async executor,
-                // but at least we can see the banner
-                unsafe { serial_out(b'{'); }  // Before halt loop
-                loop {
-                    unsafe { core::arch::asm!("hlt"); }
-                }
             }
 
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(target_arch = "x86_64")]
+            unsafe { serial_out(b'{'); }  // Before block_on
+
+            // Run the worker with the executor - this will run the shell task
             arch::block_on(worker2.run(futures::future::pending::<()>())).unwrap_err(); // the only way `run` can return is when the executor is closed
+
+            #[cfg(target_arch = "x86_64")]
+            unsafe { serial_out(b'}'); }  // After block_on (should never reach)
         }
     }
 }

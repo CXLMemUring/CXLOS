@@ -145,32 +145,171 @@ pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
     // Since we're single-threaded at this point, just run directly
     let _ = num_cpus; // not used
 
-    unsafe {
-        crate::serial_out(b'1');  // Entering shell::init_x86
-        // Print banner directly to serial as a fallback
-        crate::serial_out(b'\r');
-        crate::serial_out(b'\n');
-        crate::serial_out(b'2');  // Before banner loop
-        for &b in S.as_bytes() { crate::serial_out(b); }
-        crate::serial_out(b'3');  // After banner loop
-        crate::serial_out(b'\r');
-        crate::serial_out(b'\n');
-        crate::serial_out(b'4');  // Before hint
-        let hint = b"type `help` to list available commands\r\n> ";
-        for &b in hint { crate::serial_out(b); }
-        crate::serial_out(b'5');  // After hint (prompt is now visible)
+    // Define a local serial_out function that doesn't depend on anything else
+    #[inline(always)]
+    unsafe fn local_serial_out(byte: u8) {
+        const COM1_DATA: u16 = 0x3F8;
+        core::arch::asm!(
+            "out dx, al",
+            in("al") byte,
+            in("dx") COM1_DATA,
+            options(nomem, preserves_flags)
+        );
     }
 
-    unsafe { crate::serial_out(b'6'); }  // Before try_spawn
+    unsafe {
+        local_serial_out(b'1');  // Entering shell::init_x86
 
-    // spawn a simple polling-based serial console
-    sched
-        .try_spawn(async move {
-            x86_serial_console().await;
-        })
-        .unwrap();
+        // Initialize COM1 properly
+        const COM1_BASE: u16 = 0x3F8;
+        const IER: u16 = COM1_BASE + 1;
+        const FCR: u16 = COM1_BASE + 2;
+        const LCR: u16 = COM1_BASE + 3;
+        const MCR: u16 = COM1_BASE + 4;
 
-    unsafe { crate::serial_out(b'7'); }  // After try_spawn
+        // Disable interrupts
+        core::arch::asm!("out dx, al", in("dx") IER, in("al") 0u8, options(nomem, preserves_flags));
+        // Enable FIFO, clear them, with 14-byte threshold
+        core::arch::asm!("out dx, al", in("dx") FCR, in("al") 0xC7u8, options(nomem, preserves_flags));
+        // 8 bits, no parity, one stop bit
+        core::arch::asm!("out dx, al", in("dx") LCR, in("al") 0x03u8, options(nomem, preserves_flags));
+        // RTS/DSR set
+        core::arch::asm!("out dx, al", in("dx") MCR, in("al") 0x03u8, options(nomem, preserves_flags));
+
+        local_serial_out(b'I');  // Initialized
+        local_serial_out(b'\n');
+        local_serial_out(b'\n');
+
+        // Print banner using local function to avoid any external dependencies
+        let banner = b"CXLOS Kernel Shell\n=================\n";
+        for &b in banner {
+            local_serial_out(b);
+        }
+
+        let hint = b"type `help` to list available commands\n> ";
+        for &b in hint {
+            local_serial_out(b);
+        }
+        local_serial_out(b'O');
+        local_serial_out(b'K');
+        local_serial_out(b'\n');
+    }
+
+    unsafe { crate::serial_out(b'6'); }  // Before console start
+
+    // For x86_64, call the console directly without async to avoid Worker issues
+    unsafe { crate::serial_out(b'7'); }  // Shell init done, starting console
+}
+
+// Non-async blocking version of serial console for x86_64
+#[cfg(target_arch = "x86_64")]
+pub fn x86_serial_console_sync() -> ! {
+    use alloc::string::String;
+
+    const COM1_BASE: u16 = 0x3F8;
+    const DATA_REG: u16 = COM1_BASE;
+    const LINE_STATUS_REG: u16 = COM1_BASE + 5;
+
+    fn has_data() -> bool {
+        unsafe {
+            let status: u8;
+            core::arch::asm!(
+                "in al, dx",
+                out("al") status,
+                in("dx") LINE_STATUS_REG,
+                options(nomem, preserves_flags)
+            );
+            status & 0x01 != 0
+        }
+    }
+
+    fn read_byte() -> u8 {
+        unsafe {
+            let data: u8;
+            core::arch::asm!(
+                "in al, dx",
+                out("al") data,
+                in("dx") DATA_REG,
+                options(nomem, preserves_flags)
+            );
+            data
+        }
+    }
+
+    fn write_byte(byte: u8) {
+        unsafe {
+            loop {
+                let status: u8;
+                core::arch::asm!(
+                    "in al, dx",
+                    out("al") status,
+                    in("dx") LINE_STATUS_REG,
+                    options(nomem, preserves_flags)
+                );
+                if status & 0x20 != 0 {
+                    break;
+                }
+            }
+            core::arch::asm!(
+                "out dx, al",
+                in("al") byte,
+                in("dx") DATA_REG,
+                options(nomem, preserves_flags)
+            );
+        }
+    }
+
+    fn write_str(s: &str) {
+        for b in s.bytes() { write_byte(b); }
+    }
+
+    let mut line_buffer = String::new();
+
+    loop {
+        if has_data() {
+            let ch = read_byte();
+
+            if ch == b'\r' || ch == b'\n' {
+                write_byte(b'\n');
+
+                // Process command
+                let trimmed = line_buffer.trim();
+                if !trimmed.is_empty() {
+                    // Try built-in commands first
+                    let ctx = Context::new(trimmed);
+                    match handle_command(ctx, COMMANDS) {
+                        Ok(_) => {},
+                        Err(e) => {
+                            // Try busybox commands
+                            if let Some(impl_fn) = commands::get_command_impl(&trimmed.split_whitespace().next().unwrap_or("")) {
+                                match impl_fn.execute(trimmed) {
+                                    Ok(output) => write_str(&output),
+                                    Err(e) => write_str(&alloc::format!("Error: {}\n", e)),
+                                }
+                            } else {
+                                write_str(&alloc::format!("Unknown command: {}\n", trimmed));
+                            }
+                        }
+                    }
+                }
+
+                line_buffer.clear();
+                write_str("> ");
+            } else if ch == 127 || ch == 8 {
+                if !line_buffer.is_empty() {
+                    line_buffer.pop();
+                    write_byte(8);
+                    write_byte(b' ');
+                    write_byte(8);
+                }
+            } else if ch >= 32 && ch < 127 {
+                line_buffer.push(ch as char);
+                write_byte(ch);
+            }
+        } else {
+            unsafe { core::arch::asm!("hlt"); }
+        }
+    }
 }
 
 fn init_uart(devtree: &DeviceTree) -> (uart_16550::SerialPort, Mmap, u32) {
