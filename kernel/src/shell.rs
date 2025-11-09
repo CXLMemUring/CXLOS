@@ -277,7 +277,25 @@ pub fn x86_serial_console_sync() -> ! {
             write_byte(b'.');
         }
 
-        if has_data() {
+        // Skip has_data check - it hangs. Just try to poll a non-blocking way
+        // Use a simple delay loop instead
+        for _ in 0..10000 {
+            core::hint::spin_loop();
+        }
+
+        // Try to check manually inline
+        let data_available = unsafe {
+            let status: u8;
+            core::arch::asm!(
+                "in al, dx",
+                out("al") status,
+                in("dx") LINE_STATUS_REG,
+                options(nomem, preserves_flags)
+            );
+            status & 0x01 != 0
+        };
+
+        if data_available {
             write_byte(b'!'); // Signal we got data
             let ch = read_byte();
             write_byte(b'[');
