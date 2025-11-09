@@ -648,7 +648,13 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
     #[cfg(target_arch = "x86_64")]
     unsafe { crate::serial_out(b'['); crate::serial_out(b'W'); crate::serial_out(b'O'); crate::serial_out(b'R'); crate::serial_out(b'K'); crate::serial_out(b']'); }
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe { crate::serial_out(b'1'); }
+
     let worker_result = Worker::new(&global.executor, FastRand::from_seed(rng.next_u64()));
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { crate::serial_out(b'2'); }
 
     #[cfg(target_arch = "x86_64")]
     if worker_result.is_err() {
@@ -657,7 +663,9 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
         // Initialize WASM busybox
         let _ = busybox::wasm_loader::try_init_wasm_busybox();
 
+        unsafe { crate::serial_out(b'3'); }
         shell::init_x86(&global.executor, 1);
+        unsafe { crate::serial_out(b'4'); }
 
         // Call the blocking console with busybox support
         shell::x86_serial_console_sync();
@@ -666,7 +674,13 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
     #[cfg(target_arch = "x86_64")]
     unsafe { crate::serial_out(b'['); crate::serial_out(b'O'); crate::serial_out(b'K'); crate::serial_out(b']'); }
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe { crate::serial_out(b'5'); }
+
     let mut worker2 = worker_result.unwrap();
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { crate::serial_out(b'6'); }
 
     boot_marker(b'W');
 
