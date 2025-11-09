@@ -163,19 +163,15 @@ pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
 
         crate::serial_out(b'<'); crate::serial_out(b'P'); crate::serial_out(b'R'); crate::serial_out(b'I'); crate::serial_out(b'N'); crate::serial_out(b'T'); crate::serial_out(b'>');
 
+        // Print simple test message
         crate::serial_out(b'\r');
         crate::serial_out(b'\n');
-
-        // Print banner
-        let banner = b"CXLOS Kernel Shell\r\n=================\r\n";
-        for &b in banner {
-            crate::serial_out(b);
-        }
-
-        let hint = b"type `help` to list available commands\r\n> ";
-        for &b in hint {
-            crate::serial_out(b);
-        }
+        crate::serial_out(b'T');
+        crate::serial_out(b'E');
+        crate::serial_out(b'S');
+        crate::serial_out(b'T');
+        crate::serial_out(b'\r');
+        crate::serial_out(b'\n');
 
     }
 
@@ -247,8 +243,16 @@ pub fn x86_serial_console_sync() -> ! {
 
     let mut line_buffer = String::new();
 
-    // Signal that we're in the input loop
-    write_str(">>> READY <<<\r\n");
+    // Signal that we're in the input loop - use simple ASCII
+    write_byte(b'R');
+    write_byte(b'E');
+    write_byte(b'A');
+    write_byte(b'D');
+    write_byte(b'Y');
+    write_byte(b'\r');
+    write_byte(b'\n');
+    write_byte(b'>');
+    write_byte(b' ');
 
     loop {
         if has_data() {
