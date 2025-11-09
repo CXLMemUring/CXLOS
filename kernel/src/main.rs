@@ -651,14 +651,18 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
     // x86_64: Use synchronous shell to avoid Worker/async complications
     #[cfg(target_arch = "x86_64")]
     {
-        // Initialize WASM busybox
-        let _ = busybox::wasm_loader::try_init_wasm_busybox();
+        unsafe { crate::serial_out(b'1'); }
 
+        // TODO: Skip WASM busybox for now - it may hang during initialization
+        // let _ = busybox::wasm_loader::try_init_wasm_busybox();
+
+        unsafe { crate::serial_out(b'2'); }
         unsafe { crate::serial_out(b'<'); crate::serial_out(b'i'); crate::serial_out(b'n'); crate::serial_out(b'i'); crate::serial_out(b't'); crate::serial_out(b'>'); }
 
         // Initialize COM1 and print banner
         shell::init_x86(&global.executor, 1);
 
+        unsafe { crate::serial_out(b'3'); }
         unsafe { crate::serial_out(b'<'); crate::serial_out(b'r'); crate::serial_out(b'u'); crate::serial_out(b'n'); crate::serial_out(b'>'); }
 
         // Run the blocking synchronous shell
