@@ -182,11 +182,17 @@ pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
 // Non-async blocking version of serial console for x86_64
 #[cfg(target_arch = "x86_64")]
 pub fn x86_serial_console_sync() -> ! {
+    unsafe { crate::serial_out(b'{'); crate::serial_out(b'S'); crate::serial_out(b'Y'); crate::serial_out(b'N'); crate::serial_out(b'C'); crate::serial_out(b'}'); }
+
     use alloc::string::String;
+
+    unsafe { crate::serial_out(b'1'); }
 
     const COM1_BASE: u16 = 0x3F8;
     const DATA_REG: u16 = COM1_BASE;
     const LINE_STATUS_REG: u16 = COM1_BASE + 5;
+
+    unsafe { crate::serial_out(b'2'); }
 
     fn has_data() -> bool {
         unsafe {
@@ -241,7 +247,11 @@ pub fn x86_serial_console_sync() -> ! {
         for b in s.bytes() { write_byte(b); }
     }
 
+    unsafe { crate::serial_out(b'3'); }
+
     let mut line_buffer = String::new();
+
+    unsafe { crate::serial_out(b'4'); }
 
     // Signal that we're in the input loop - use simple ASCII
     write_byte(b'R');
@@ -254,7 +264,11 @@ pub fn x86_serial_console_sync() -> ! {
     write_byte(b'>');
     write_byte(b' ');
 
+    unsafe { crate::serial_out(b'5'); }
+
     let mut heartbeat_counter = 0u32;
+
+    unsafe { crate::serial_out(b'6'); }
 
     loop {
         // Heartbeat every ~1 million iterations
