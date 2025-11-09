@@ -229,14 +229,6 @@ extern "C" fn _rust_start(cpuid: usize, boot_info_ptr: usize, boot_ticks: u64) -
         // Get raw pointer without creating any reference - this bypasses Rust's validation
         let boot_info_raw_ptr = core::ptr::addr_of!(BOOT_INFO_COPY) as *const BootInfo;
 
-        // Output 'I' after BootInfo copy
-        core::arch::asm!(
-            "mov dx, 0x3F8",
-            "mov al, 0x49",
-            "out dx, al",
-            options(nomem, nostack, preserves_flags)
-        );
-
         _rust_start_impl(cpuid, boot_info_raw_ptr, boot_ticks)
     }
 }
@@ -758,10 +750,8 @@ fn allocatable_memory_regions_impl_x86(boot_info: &BootInfo, physmap_size: usize
     // Check slice pointer
     unsafe {
         let ptr = boot_info.memory_regions.as_ptr() as usize;
-        serial_out(b'P');  // Slice pointer check
         // Try to read first byte of the slice data
         let _first_byte = core::ptr::read_volatile(ptr as *const u8);
-        serial_out(b'p');  // After reading first byte
     }
 
     // Manually iterate to avoid iterator trait issues
