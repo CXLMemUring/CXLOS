@@ -158,8 +158,6 @@ pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
     }
 
     unsafe {
-        local_serial_out(b'1');  // Entering shell::init_x86
-
         // Initialize COM1 properly
         const COM1_BASE: u16 = 0x3F8;
         const IER: u16 = COM1_BASE + 1;
@@ -176,29 +174,20 @@ pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
         // RTS/DSR set
         core::arch::asm!("out dx, al", in("dx") MCR, in("al") 0x03u8, options(nomem, preserves_flags));
 
-        local_serial_out(b'I');  // Initialized
-        local_serial_out(b'\n');
+        local_serial_out(b'\r');
         local_serial_out(b'\n');
 
         // Print banner using local function to avoid any external dependencies
-        let banner = b"CXLOS Kernel Shell\n=================\n";
+        let banner = b"CXLOS Kernel Shell\r\n=================\r\n";
         for &b in banner {
             local_serial_out(b);
         }
 
-        let hint = b"type `help` to list available commands\n> ";
+        let hint = b"type `help` to list available commands\r\n> ";
         for &b in hint {
             local_serial_out(b);
         }
-        local_serial_out(b'O');
-        local_serial_out(b'K');
-        local_serial_out(b'\n');
     }
-
-    unsafe { crate::serial_out(b'6'); }  // Before console start
-
-    // For x86_64, call the console directly without async to avoid Worker issues
-    unsafe { crate::serial_out(b'7'); }  // Shell init done, starting console
 }
 
 // Non-async blocking version of serial console for x86_64
@@ -279,15 +268,19 @@ pub fn x86_serial_console_sync() -> ! {
                     let ctx = Context::new(trimmed);
                     match handle_command(ctx, COMMANDS) {
                         Ok(_) => {},
-                        Err(e) => {
+                        Err(_e) => {
                             // Try busybox commands
-                            if let Some(impl_fn) = commands::get_command_impl(&trimmed.split_whitespace().next().unwrap_or("")) {
-                                match impl_fn.execute(trimmed) {
-                                    Ok(output) => write_str(&output),
-                                    Err(e) => write_str(&alloc::format!("Error: {}\n", e)),
+                            let parts: alloc::vec::Vec<String> = trimmed.split_whitespace().map(|s| s.to_string()).collect();
+                            if !parts.is_empty() {
+                                if let Some(impl_fn) = commands::get_command_impl(&parts[0]) {
+                                    let mut cmd_ctx = commands::CommandContext::new(parts);
+                                    match impl_fn.execute(&mut cmd_ctx) {
+                                        Ok(output) => write_str(&output),
+                                        Err(e) => write_str(&alloc::format!("Error: {}\n", e)),
+                                    }
+                                } else {
+                                    write_str(&alloc::format!("Unknown command: {}\n", trimmed));
                                 }
-                            } else {
-                                write_str(&alloc::format!("Unknown command: {}\n", trimmed));
                             }
                         }
                     }
@@ -537,9 +530,6 @@ pub fn eval(line: &str) {
         // x86_64: print directly to serial; avoid tracing to prevent hangs
         #[cfg(target_arch = "x86_64")]
         {
-            // tiny breadcrumb
-            serial_write_byte_blocking(b'^');
-            serial_write_line_blocking("[help] enter");
             serial_write_line_blocking("available commands:");
             for cmd in COMMANDS {
                 use core::fmt::Write;
@@ -551,7 +541,6 @@ pub fn eval(line: &str) {
             serial_write_line_blocking("BusyBox commands:");
             serial_write_line_blocking("  busybox --- list all busybox commands");
             serial_write_line_blocking("  or run any busybox command directly (e.g., echo, pwd, uname)");
-            serial_write_line_blocking("[help] done");
         }
         return;
     }
