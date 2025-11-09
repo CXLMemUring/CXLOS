@@ -75,10 +75,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 pub unsafe extern "C" fn serial_out(byte: u8) {
     unsafe {
         core::arch::asm!(
-            "out %al, %dx",
+            "out dx, al",
             in("al") byte,
             in("dx") 0x3F8u16,
-            options(nostack, preserves_flags, att_syntax)
+            options(nostack, preserves_flags)
         );
     }
 }
