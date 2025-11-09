@@ -143,18 +143,6 @@ pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
 
     unsafe { crate::serial_out(b'<'); crate::serial_out(b'i'); crate::serial_out(b'n'); crate::serial_out(b'i'); crate::serial_out(b't'); crate::serial_out(b'>'); }
 
-    // Define a local serial_out function that doesn't depend on anything else
-    #[inline(always)]
-    unsafe fn local_serial_out(byte: u8) {
-        const COM1_DATA: u16 = 0x3F8;
-        core::arch::asm!(
-            "out dx, al",
-            in("al") byte,
-            in("dx") COM1_DATA,
-            options(nomem, preserves_flags)
-        );
-    }
-
     unsafe {
         crate::serial_out(b'<'); crate::serial_out(b'C'); crate::serial_out(b'O'); crate::serial_out(b'M'); crate::serial_out(b'1'); crate::serial_out(b'>');
         // Initialize COM1 properly
@@ -175,31 +163,23 @@ pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
 
         crate::serial_out(b'<'); crate::serial_out(b'P'); crate::serial_out(b'R'); crate::serial_out(b'I'); crate::serial_out(b'N'); crate::serial_out(b'T'); crate::serial_out(b'>');
 
-        local_serial_out(b'\r');
-        local_serial_out(b'\n');
+        crate::serial_out(b'\r');
+        crate::serial_out(b'\n');
 
-        // Print banner using local function to avoid any external dependencies
+        // Print banner
         let banner = b"CXLOS Kernel Shell\r\n=================\r\n";
         for &b in banner {
-            local_serial_out(b);
+            crate::serial_out(b);
         }
 
         let hint = b"type `help` to list available commands\r\n> ";
         for &b in hint {
-            local_serial_out(b);
+            crate::serial_out(b);
         }
 
-        crate::serial_out(b'<'); crate::serial_out(b'S'); crate::serial_out(b'P'); crate::serial_out(b'A'); crate::serial_out(b'W'); crate::serial_out(b'N'); crate::serial_out(b'>');
     }
 
-    // IMPORTANT: Spawn the shell console task!
-    sched
-        .try_spawn(async move {
-            unsafe { crate::serial_out(b'<'); crate::serial_out(b'A'); crate::serial_out(b'S'); crate::serial_out(b'Y'); crate::serial_out(b'N'); crate::serial_out(b'C'); crate::serial_out(b'>'); }
-            x86_serial_console().await;
-        })
-        .unwrap();
-
+    // Don't spawn async task - we'll use synchronous shell instead
     unsafe { crate::serial_out(b'<'); crate::serial_out(b'/'); crate::serial_out(b'i'); crate::serial_out(b'n'); crate::serial_out(b'i'); crate::serial_out(b't'); crate::serial_out(b'>'); }
 }
 
