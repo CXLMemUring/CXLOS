@@ -645,10 +645,14 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
     );
     boot_marker(b'B');
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe { crate::serial_out(b'['); crate::serial_out(b'W'); crate::serial_out(b'O'); crate::serial_out(b'R'); crate::serial_out(b'K'); crate::serial_out(b']'); }
+
     let worker_result = Worker::new(&global.executor, FastRand::from_seed(rng.next_u64()));
 
     #[cfg(target_arch = "x86_64")]
     if worker_result.is_err() {
+        unsafe { crate::serial_out(b'['); crate::serial_out(b'E'); crate::serial_out(b'R'); crate::serial_out(b'R'); crate::serial_out(b']'); }
         // Worker creation failed - fall back to sync shell with busybox
         // Initialize WASM busybox
         let _ = busybox::wasm_loader::try_init_wasm_busybox();
@@ -658,6 +662,9 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
         // Call the blocking console with busybox support
         shell::x86_serial_console_sync();
     }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { crate::serial_out(b'['); crate::serial_out(b'O'); crate::serial_out(b'K'); crate::serial_out(b']'); }
 
     let mut worker2 = worker_result.unwrap();
 
@@ -680,22 +687,27 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
 
             #[cfg(target_arch = "x86_64")]
             {
+                unsafe { crate::serial_out(b'['); crate::serial_out(b'S'); crate::serial_out(b'H'); crate::serial_out(b'E'); crate::serial_out(b'L'); crate::serial_out(b'L'); crate::serial_out(b']'); }
+
                 // Initialize WASM busybox
                 match busybox::wasm_loader::try_init_wasm_busybox() {
                     Ok(true) => {
-                        // Successfully initialized WASM busybox
+                        unsafe { crate::serial_out(b'['); crate::serial_out(b'W'); crate::serial_out(b'A'); crate::serial_out(b'S'); crate::serial_out(b'M'); crate::serial_out(b']'); }
                     }
                     Ok(false) => {
-                        // WASM busybox not available, will use native commands only
+                        unsafe { crate::serial_out(b'['); crate::serial_out(b'N'); crate::serial_out(b'O'); crate::serial_out(b'W'); crate::serial_out(b']'); }
                     }
                     Err(_e) => {
-                        // Failed to initialize WASM busybox, will use native commands only
+                        unsafe { crate::serial_out(b'['); crate::serial_out(b'F'); crate::serial_out(b'A'); crate::serial_out(b'I'); crate::serial_out(b'L'); crate::serial_out(b']'); }
                     }
                 }
 
+                unsafe { crate::serial_out(b'['); crate::serial_out(b'I'); crate::serial_out(b'N'); crate::serial_out(b'I'); crate::serial_out(b'T'); crate::serial_out(b']'); }
                 shell::init_x86(&global.executor, 1);
+                unsafe { crate::serial_out(b'['); crate::serial_out(b'D'); crate::serial_out(b'O'); crate::serial_out(b'N'); crate::serial_out(b'E'); crate::serial_out(b']'); }
             }
 
+            unsafe { crate::serial_out(b'['); crate::serial_out(b'B'); crate::serial_out(b'L'); crate::serial_out(b'O'); crate::serial_out(b'C'); crate::serial_out(b'K'); crate::serial_out(b']'); }
             // Run the worker with the executor - this will run the shell task
             arch::block_on(worker2.run(futures::future::pending::<()>())).unwrap_err(); // the only way `run` can return is when the executor is closed
         }

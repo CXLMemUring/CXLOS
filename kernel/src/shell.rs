@@ -139,9 +139,9 @@ pub fn init(devtree: &'static DeviceTree, sched: &'static Executor, num_cpus: us
 // x86_64: variant of init that does not require a DeviceTree reference
 #[cfg(target_arch = "x86_64")]
 pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
-    // x86_64 workaround: avoid OnceLock spinlock during early boot
-    // Since we're single-threaded at this point, just run directly
     let _ = num_cpus; // not used
+
+    unsafe { crate::serial_out(b'<'); crate::serial_out(b'i'); crate::serial_out(b'n'); crate::serial_out(b'i'); crate::serial_out(b't'); crate::serial_out(b'>'); }
 
     // Define a local serial_out function that doesn't depend on anything else
     #[inline(always)]
@@ -156,6 +156,7 @@ pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
     }
 
     unsafe {
+        crate::serial_out(b'<'); crate::serial_out(b'C'); crate::serial_out(b'O'); crate::serial_out(b'M'); crate::serial_out(b'1'); crate::serial_out(b'>');
         // Initialize COM1 properly
         const COM1_BASE: u16 = 0x3F8;
         const IER: u16 = COM1_BASE + 1;
@@ -172,6 +173,8 @@ pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
         // RTS/DSR set
         core::arch::asm!("out dx, al", in("dx") MCR, in("al") 0x03u8, options(nomem, preserves_flags));
 
+        crate::serial_out(b'<'); crate::serial_out(b'P'); crate::serial_out(b'R'); crate::serial_out(b'I'); crate::serial_out(b'N'); crate::serial_out(b'T'); crate::serial_out(b'>');
+
         local_serial_out(b'\r');
         local_serial_out(b'\n');
 
@@ -185,7 +188,19 @@ pub fn init_x86(sched: &'static Executor, num_cpus: usize) {
         for &b in hint {
             local_serial_out(b);
         }
+
+        crate::serial_out(b'<'); crate::serial_out(b'S'); crate::serial_out(b'P'); crate::serial_out(b'A'); crate::serial_out(b'W'); crate::serial_out(b'N'); crate::serial_out(b'>');
     }
+
+    // IMPORTANT: Spawn the shell console task!
+    sched
+        .try_spawn(async move {
+            unsafe { crate::serial_out(b'<'); crate::serial_out(b'A'); crate::serial_out(b'S'); crate::serial_out(b'Y'); crate::serial_out(b'N'); crate::serial_out(b'C'); crate::serial_out(b'>'); }
+            x86_serial_console().await;
+        })
+        .unwrap();
+
+    unsafe { crate::serial_out(b'<'); crate::serial_out(b'/'); crate::serial_out(b'i'); crate::serial_out(b'n'); crate::serial_out(b'i'); crate::serial_out(b't'); crate::serial_out(b'>'); }
 }
 
 // Non-async blocking version of serial console for x86_64
@@ -348,6 +363,8 @@ fn init_uart(devtree: &DeviceTree) -> (uart_16550::SerialPort, Mmap, u32) {
 
 #[cfg(target_arch = "x86_64")]
 pub async fn x86_serial_console() -> ! {
+    unsafe { crate::serial_out(b'{'); crate::serial_out(b'C'); crate::serial_out(b'O'); crate::serial_out(b'N'); crate::serial_out(b'S'); crate::serial_out(b'O'); crate::serial_out(b'L'); crate::serial_out(b'E'); crate::serial_out(b'}'); }
+
     use alloc::string::String;
 
     use kasync::task::yield_now;

@@ -281,7 +281,6 @@ impl FallibleIterator for ArenaSelections {
                     } else {
                         arena.start = region.start;
                     }
-                    #[cfg(target_arch = "x86_64")]
                 }
             }
 
