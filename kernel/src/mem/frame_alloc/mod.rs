@@ -56,11 +56,9 @@ pub fn init(
         use core::ptr::addr_of_mut;
 
         FRAME_ALLOC_ONCE.call_once(|| {
-            unsafe { crate::serial_out(b'U'); }  // Before construction
 
             let (global, max_align, cpu_cache) = FrameAllocator::new_parts(boot_alloc, fdt_region);
 
-            unsafe { crate::serial_out(b'X'); }  // After new_parts
 
             unsafe {
                 let ptr = FRAME_ALLOC_STORAGE.0.as_mut_ptr();
@@ -70,9 +68,7 @@ pub fn init(
                 addr_of_mut!((*ptr).cpu_local_cache).write(cpu_cache);
             }
 
-            unsafe { crate::serial_out(b'V'); }  // After field writes
         });
-        unsafe { crate::serial_out(b'~'); }  // After call_once
     }
 
     unsafe { &*FRAME_ALLOC_STORAGE.0.as_ptr() }
@@ -122,8 +118,6 @@ impl FrameAllocator {
         fdt_region: Range<PhysicalAddress>,
     ) -> (Mutex<GlobalFrameAllocator>, usize, CpuLocal<RefCell<CpuLocalFrameCache>>) {
         // UNIQUE MARKER - if you see @ it means this new code is running!
-        unsafe { crate::serial_out(b'@'); crate::serial_out(b'@'); crate::serial_out(b'@'); }
-        crate::boot_marker(b'A');
         let mut max_alignment = arch::PAGE_SIZE;
         let mut arenas: Vec<Arena> = Vec::new();
         let mut x86_count: usize = 0;
@@ -133,69 +127,48 @@ impl FrameAllocator {
             .chain(iter::once(fdt_region))
             .collect();
 
-        crate::boot_marker(b'B');
 
-        unsafe { crate::serial_out(b'['); }  // Before iterator
 
         let mut iter = select_arenas(phys_regions).iterator();
 
-        unsafe { crate::serial_out(b']'); }  // After iterator created
 
         loop {
-            crate::boot_marker(b'C');
 
-            unsafe { crate::serial_out(b'N'); }  // Before next()
 
             let selection_result = match iter.next() {
                 Some(result) => result,
                 None => {
-                    unsafe { crate::serial_out(b'E'); }  // Iterator exhausted
                     break;
                 }
             };
 
-            unsafe { crate::serial_out(b'M'); }  // After next(), before match
 
             match selection_result {
                 Ok(selection) => {
-                    crate::boot_marker(b'D');
                     let arena = Arena::from_selection(selection);
                     tracing::trace!("max arena alignment {}", arena.max_alignment());
                     max_alignment = cmp::max(max_alignment, arena.max_alignment());
                     arenas.push(arena);
                     x86_count += 1;
-                    unsafe { crate::serial_out(b'0' + (x86_count as u8).min(9)); }  // Show count
                     if x86_count >= 8 {
-                        unsafe { crate::serial_out(b'!'); }  // Breaking
                         break;
                     }
                 }
                 Err(err) => {
-                    crate::boot_marker(b'X');
                     tracing::error!("unable to include RAM region {:?}", err.range);
                 }
             }
         }
 
-        unsafe { crate::serial_out(b'Z'); }  // After loop, before F
 
-        crate::boot_marker(b'F');
 
-        unsafe { crate::serial_out(b'Y'); }  // After F, before return
 
-        unsafe { crate::serial_out(b'P'); }  // Constructing parts
 
-        unsafe { crate::serial_out(b'1'); }  // Before Mutex::new
         let global = Mutex::new(GlobalFrameAllocator { arenas });
-        unsafe { crate::serial_out(b'2'); }  // After Mutex::new
 
-        unsafe { crate::serial_out(b'3'); }  // Before CpuLocal::new
         let cpu_local_cache = CpuLocal::new();
-        unsafe { crate::serial_out(b'4'); }  // After CpuLocal::new
 
-        unsafe { crate::serial_out(b'Q'); }  // Parts constructed
 
-        unsafe { crate::serial_out(b'5'); }  // Before return
         (global, max_alignment, cpu_local_cache)
     }
 

@@ -60,7 +60,6 @@ pub fn init(
     rand: &mut impl rand::RngCore,
     frame_alloc: &'static FrameAllocator,
 ) -> crate::Result<()> {
-    crate::boot_marker(b'M');
     KERNEL_ASPACE.get_or_try_init(|| -> crate::Result<_> {
         let (hw_aspace, mut flush) = arch::AddressSpace::from_active(arch::DEFAULT_ASID);
 
@@ -79,13 +78,11 @@ pub fn init(
 
         Ok(Arc::new(Mutex::new(aspace)))
     })?;
-    crate::boot_marker(b'N');
 
     Ok(())
 }
 
 fn reserve_wired_regions(aspace: &mut AddressSpace, boot_info: &BootInfo, flush: &mut Flush) {
-    crate::boot_marker(b'p');
     // reserve the physical memory map
     aspace
         .reserve(
@@ -98,7 +95,6 @@ fn reserve_wired_regions(aspace: &mut AddressSpace, boot_info: &BootInfo, flush:
             flush,
         )
         .unwrap();
-    crate::boot_marker(b'q');
 
     // Safety: we have to trust the loaders BootInfo here
     let own_elf = unsafe {
@@ -193,7 +189,6 @@ fn reserve_wired_regions(aspace: &mut AddressSpace, boot_info: &BootInfo, flush:
     } else {
         tracing::warn!("No PT_LOAD segments found in kernel ELF");
     }
-    crate::boot_marker(b't');
 }
 
 bitflags::bitflags! {

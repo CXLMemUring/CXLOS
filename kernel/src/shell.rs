@@ -81,9 +81,7 @@ pub fn init(devtree: &'static DeviceTree, sched: &'static Executor, num_cpus: us
         #[cfg(target_arch = "x86_64")]
         unsafe {
             // Print banner directly to serial as a fallback
-            crate::serial_out(b'\r'); crate::serial_out(b'\n');
             for &b in S.as_bytes() { crate::serial_out(b); }
-            crate::serial_out(b'\r'); crate::serial_out(b'\n');
             let hint = b"type `help` to list available commands\r\n";
             for &b in hint { crate::serial_out(b); }
         }
@@ -446,15 +444,6 @@ pub async fn x86_serial_console() -> ! {
 
     // Output VERY distinctive pattern
     unsafe {
-        crate::serial_out(b'\r');
-        crate::serial_out(b'\n');
-        crate::serial_out(b'=');
-        crate::serial_out(b'=');
-        crate::serial_out(b'=');
-        crate::serial_out(b'=');
-        crate::serial_out(b'=');
-        crate::serial_out(b'\r');
-        crate::serial_out(b'\n');
     }
     write_str("CXLOS x86_64 Shell\r\n");
     write_str("type `help` to list available commands\r\n> ");

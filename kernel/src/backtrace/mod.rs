@@ -59,7 +59,6 @@ pub fn init(boot_info: &'static BootInfo, backtrace_style: BacktraceStyle) {
     // debug: 'F' entering backtrace::init
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        crate::serial_out(b'F');
     }
 
     #[cfg(not(target_arch = "x86_64"))]
@@ -72,7 +71,6 @@ pub fn init(boot_info: &'static BootInfo, backtrace_style: BacktraceStyle) {
         // x86_64 workaround: skip backtrace initialization during early boot
         // TODO: investigate why BacktraceInfo::new causes null pointer dereferences
         unsafe {
-            crate::serial_out(b'S');  // Skipping backtrace init
         }
         let _ = boot_info;
         let _ = backtrace_style;
@@ -81,7 +79,6 @@ pub fn init(boot_info: &'static BootInfo, backtrace_style: BacktraceStyle) {
     // debug: 'f' leaving backtrace::init
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        crate::serial_out(b'f');
     }
 }
 
@@ -127,7 +124,6 @@ impl BacktraceInfo {
         // debug: '1' entering BacktraceInfo::new
         #[cfg(target_arch = "x86_64")]
         unsafe {
-            crate::serial_out(b'1');
         }
         BacktraceInfo {
             kernel_virt_base: boot_info.kernel_virt.start as u64,
@@ -148,10 +144,8 @@ impl BacktraceInfo {
                 } as *const u8;
                 // debug: '2' after computing ELF base
                 #[cfg(target_arch = "x86_64")]
-                crate::serial_out(b'2');
 
                 #[cfg(target_arch = "x86_64")]
-                crate::serial_out(b'3');  // before from_raw_parts
 
                 let result = slice::from_raw_parts(
                     base,
@@ -163,7 +157,6 @@ impl BacktraceInfo {
                 );
 
                 #[cfg(target_arch = "x86_64")]
-                crate::serial_out(b'4');  // after from_raw_parts
 
                 result
             },

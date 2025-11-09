@@ -34,11 +34,9 @@ pub const STACK_ALIGNMENT: usize = 16;
 #[cold]
 pub fn init() -> state::Global {
     #[cfg(target_arch = "x86_64")]
-    crate::boot_marker(b'{');
     mem::init();
     asid_allocator::init();
     #[cfg(target_arch = "x86_64")]
-    crate::boot_marker(b'}');
 
     state::Global {}
 }
@@ -105,10 +103,8 @@ pub fn per_cpu_init_early() {
 pub fn per_cpu_init_late(devtree: &DeviceTree, cpuid: usize) -> crate::Result<state::CpuLocal> {
     // Initialize the trap handler
     #[cfg(target_arch = "x86_64")]
-    crate::boot_marker(b'P');
     trap_handler::init();
     #[cfg(target_arch = "x86_64")]
-    crate::boot_marker(b'Q');
 
     Ok(state::CpuLocal {
         cpu: Cpu::new(devtree, cpuid)?,
@@ -119,9 +115,7 @@ pub fn per_cpu_init_late(devtree: &DeviceTree, cpuid: usize) -> crate::Result<st
 #[cfg(target_arch = "x86_64")]
 pub fn per_cpu_init_late_no_dt(cpuid: usize) -> crate::Result<state::CpuLocal> {
     // Initialize the trap handler
-    crate::boot_marker(b'P');
     trap_handler::init();
-    crate::boot_marker(b'Q');
 
     Ok(state::CpuLocal {
         cpu: Cpu::new_without_dt(cpuid)?,
