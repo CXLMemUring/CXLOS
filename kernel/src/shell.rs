@@ -247,11 +247,15 @@ pub fn x86_serial_console_sync() -> ! {
 
     let mut line_buffer = String::new();
 
+    // Signal that we're in the input loop
+    write_str(">>> READY <<<\r\n");
+
     loop {
         if has_data() {
             let ch = read_byte();
 
             if ch == b'\r' || ch == b'\n' {
+                write_byte(b'\r');
                 write_byte(b'\n');
 
                 // Process command
