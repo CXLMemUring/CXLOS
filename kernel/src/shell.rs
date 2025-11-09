@@ -254,9 +254,21 @@ pub fn x86_serial_console_sync() -> ! {
     write_byte(b'>');
     write_byte(b' ');
 
+    let mut heartbeat_counter = 0u32;
+
     loop {
+        // Heartbeat every ~1 million iterations
+        heartbeat_counter = heartbeat_counter.wrapping_add(1);
+        if heartbeat_counter % 1_000_000 == 0 {
+            write_byte(b'.');
+        }
+
         if has_data() {
+            write_byte(b'!'); // Signal we got data
             let ch = read_byte();
+            write_byte(b'[');
+            write_byte(ch);
+            write_byte(b']');
 
             if ch == b'\r' || ch == b'\n' {
                 write_byte(b'\r');
