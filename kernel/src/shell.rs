@@ -288,7 +288,32 @@ pub fn x86_serial_console_sync() -> ! {
 
     unsafe { crate::serial_out(b'5'); }
 
-    // Enable serial port interrupts instead of polling
+    // Initialize PIC (Programmable Interrupt Controller)
+    unsafe {
+        // ICW1: Initialize PIC
+        core::arch::asm!("out 0x20, al", in("al") 0x11u8, options(nomem, nostack));
+        core::arch::asm!("out 0xA0, al", in("al") 0x11u8, options(nomem, nostack));
+
+        // ICW2: Set vector offsets (master at 32, slave at 40)
+        core::arch::asm!("out 0x21, al", in("al") 32u8, options(nomem, nostack));
+        core::arch::asm!("out 0xA1, al", in("al") 40u8, options(nomem, nostack));
+
+        // ICW3: Tell master there's a slave at IRQ2
+        core::arch::asm!("out 0x21, al", in("al") 0x04u8, options(nomem, nostack));
+        core::arch::asm!("out 0xA1, al", in("al") 0x02u8, options(nomem, nostack));
+
+        // ICW4: 8086 mode
+        core::arch::asm!("out 0x21, al", in("al") 0x01u8, options(nomem, nostack));
+        core::arch::asm!("out 0xA1, al", in("al") 0x01u8, options(nomem, nostack));
+
+        // Unmask all interrupts (OCW1)
+        core::arch::asm!("out 0x21, al", in("al") 0x00u8, options(nomem, nostack));
+        core::arch::asm!("out 0xA1, al", in("al") 0x00u8, options(nomem, nostack));
+    }
+
+    unsafe { crate::serial_out(b'P'); } // PIC initialized
+
+    // Enable serial port interrupts
     // IER (Interrupt Enable Register) = COM1_BASE + 1
     const INTERRUPT_ENABLE_REG: u16 = COM1_BASE + 1;
     unsafe {
@@ -314,7 +339,14 @@ pub fn x86_serial_console_sync() -> ! {
         );
     }
 
-    unsafe { crate::serial_out(b'I'); } // Interrupt enabled marker
+    unsafe { crate::serial_out(b'I'); } // Serial interrupt enabled
+
+    // Enable CPU interrupts with STI
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
+
+    unsafe { crate::serial_out(b'S'); } // STI executed
 
     // Skip command testing - it causes issues
     // Just show that we reached this point and start heartbeat
