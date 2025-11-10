@@ -498,8 +498,10 @@ extern "C" fn default_trap_handler(frame: &mut TrapFrame) {
 }
 
 fn handle_irq(irq: u64) {
-    // For now, just acknowledge the interrupt
-    // TODO: Implement proper IRQ handling with APIC/PIC
+    // Handle serial port interrupt (COM1 = IRQ 4)
+    if irq == 4 {
+        handle_serial_irq();
+    }
 
     // Send EOI to PIC if using legacy PIC
     if irq < 16 {
@@ -517,6 +519,25 @@ fn handle_irq(irq: u64) {
     if let Some(global) = crate::state::try_global() {
         global.executor.wake_one();
     }
+}
+
+fn handle_serial_irq() {
+    const COM1_DATA: u16 = 0x3F8;
+
+    // Read the character from serial port
+    let ch = unsafe {
+        let mut data: u8;
+        asm!(
+            "in al, dx",
+            out("al") data,
+            in("dx") COM1_DATA,
+            options(nomem, nostack)
+        );
+        data
+    };
+
+    // Call shell's serial input handler
+    crate::shell::on_serial_interrupt(ch);
 }
 
 fn handle_kernel_exception(

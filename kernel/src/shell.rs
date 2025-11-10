@@ -13,6 +13,42 @@ CXLOS Kernel Shell
 =================
 "#;
 
+// Serial input ring buffer (lock-free for interrupt context)
+const SERIAL_BUFFER_SIZE: usize = 256;
+static SERIAL_BUFFER: [AtomicU8; SERIAL_BUFFER_SIZE] = [const { AtomicU8::new(0) }; SERIAL_BUFFER_SIZE];
+static SERIAL_READ_POS: AtomicUsize = AtomicUsize::new(0);
+static SERIAL_WRITE_POS: AtomicUsize = AtomicUsize::new(0);
+
+/// Called from interrupt handler when serial data arrives
+pub fn on_serial_interrupt(ch: u8) {
+    let write_pos = SERIAL_WRITE_POS.load(Ordering::Acquire);
+    let read_pos = SERIAL_READ_POS.load(Ordering::Acquire);
+    let next_write = (write_pos + 1) % SERIAL_BUFFER_SIZE;
+
+    // Check if buffer is full
+    if next_write != read_pos {
+        SERIAL_BUFFER[write_pos].store(ch, Ordering::Release);
+        SERIAL_WRITE_POS.store(next_write, Ordering::Release);
+    }
+    // If buffer is full, drop the character
+}
+
+/// Try to read a character from the serial input buffer
+fn try_read_serial() -> Option<u8> {
+    let read_pos = SERIAL_READ_POS.load(Ordering::Acquire);
+    let write_pos = SERIAL_WRITE_POS.load(Ordering::Acquire);
+
+    if read_pos == write_pos {
+        // Buffer is empty
+        None
+    } else {
+        let ch = SERIAL_BUFFER[read_pos].load(Ordering::Acquire);
+        let next_read = (read_pos + 1) % SERIAL_BUFFER_SIZE;
+        SERIAL_READ_POS.store(next_read, Ordering::Release);
+        Some(ch)
+    }
+}
+
 use alloc::string::{String, ToString};
 use alloc::format;
 use core::fmt;
@@ -20,6 +56,7 @@ use core::fmt::Write;
 use core::ops::DerefMut;
 use core::range::Range;
 use core::str::FromStr;
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use fallible_iterator::FallibleIterator;
 use kasync::executor::Executor;
@@ -291,26 +328,58 @@ pub fn x86_serial_console_sync() -> ! {
 
     unsafe { crate::serial_out(b'6'); }
 
-    // Test if we can output dots directly
-    unsafe { crate::serial_out(b'.'); }
-    unsafe { crate::serial_out(b'.'); }
-    unsafe { crate::serial_out(b'.'); }
+    write_str("Interrupt-driven input enabled\r\n> ");
 
     loop {
-        // Heartbeat every ~100k iterations (faster to see it work)
-        heartbeat_counter = heartbeat_counter.wrapping_add(1);
-        if heartbeat_counter % 100_000 == 0 {
-            unsafe { crate::serial_out(b'.'); }  // Use serial_out directly
+        // Check for input from interrupt buffer
+        if let Some(ch) = try_read_serial() {
+            // Process the character
+            if ch >= 32 && ch < 127 || ch == b'\r' || ch == b'\n' {
+                // Echo the character
+                write_byte(ch);
+
+                if ch == b'\r' || ch == b'\n' {
+                    write_byte(b'\r');
+                    write_byte(b'\n');
+
+                    // Process command
+                    let trimmed = line_buffer.trim();
+                    if !trimmed.is_empty() {
+                        // Try built-in commands first
+                        let ctx = Context::new(trimmed);
+                        match handle_command(ctx, COMMANDS) {
+                            Ok(_) => {},
+                            Err(_e) => {
+                                // Try busybox commands
+                                let parts: alloc::vec::Vec<String> = trimmed.split_whitespace().map(|s| s.to_string()).collect();
+                                if !parts.is_empty() {
+                                    if let Some(impl_fn) = commands::get_command_impl(&parts[0]) {
+                                        let mut cmd_ctx = commands::CommandContext::new(parts);
+                                        match impl_fn.execute(&mut cmd_ctx) {
+                                            Ok(output) => write_str(&output),
+                                            Err(e) => write_str(&alloc::format!("Error: {}\n", e)),
+                                        }
+                                    } else {
+                                        write_str(&alloc::format!("Unknown command: {}\n", trimmed));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    line_buffer.clear();
+                    write_str("> ");
+                } else {
+                    // Add to line buffer
+                    line_buffer.push(ch as char);
+                }
+            }
         }
 
-        // Just loop with heartbeat - input is disabled
+        // Small delay when no input
         for _ in 0..1000 {
             core::hint::spin_loop();
         }
-
-        // TODO: Implement proper interrupt-driven input or find alternative
-        // Current issue: Cannot read LINE_STATUS_REG without hanging,
-        // and reading DATA_REG directly gives stale data
     }
 }
 
