@@ -252,6 +252,8 @@ pub fn x86_serial_console_sync() -> ! {
     unsafe { crate::serial_out(b'5'); }
 
     let mut heartbeat_counter = 0u32;
+    let mut last_ch = 0u8;
+    let mut same_count = 0u32;
 
     unsafe { crate::serial_out(b'6'); }
 
@@ -280,8 +282,16 @@ pub fn x86_serial_console_sync() -> ! {
             data
         };
 
-        // Filter out "no data" values and process valid ASCII
-        if ch != 0xFF && ch != 0x00 && (ch >= 32 && ch < 127 || ch == b'\r' || ch == b'\n') {
+        // Track if we're seeing the same byte repeatedly
+        if ch == last_ch {
+            same_count += 1;
+        } else {
+            same_count = 0;
+            last_ch = ch;
+        }
+
+        // Only process if: valid ASCII AND either different from last OR first time seeing it
+        if same_count == 0 && ch != 0xFF && ch != 0x00 && (ch >= 32 && ch < 127 || ch == b'\r' || ch == b'\n') {
             // Debug: show hex value of character
             write_byte(b'<');
             let hex_hi = (ch >> 4) & 0x0F;
@@ -292,11 +302,6 @@ pub fn x86_serial_console_sync() -> ! {
 
             // Echo the character
             write_byte(ch);
-
-            // Add significant delay after reading to avoid re-reading same byte
-            for _ in 0..100_000 {
-                core::hint::spin_loop();
-            }
 
             if ch == b'\r' || ch == b'\n' {
                     write_byte(b'\r');
