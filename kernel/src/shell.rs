@@ -291,15 +291,20 @@ pub fn x86_serial_console_sync() -> ! {
 
     unsafe { crate::serial_out(b'6'); }
 
+    // Test if we can output dots directly
+    unsafe { crate::serial_out(b'.'); }
+    unsafe { crate::serial_out(b'.'); }
+    unsafe { crate::serial_out(b'.'); }
+
     loop {
-        // Heartbeat every ~1M iterations
+        // Heartbeat every ~100k iterations (faster to see it work)
         heartbeat_counter = heartbeat_counter.wrapping_add(1);
-        if heartbeat_counter % 1_000_000 == 0 {
-            write_byte(b'.');
+        if heartbeat_counter % 100_000 == 0 {
+            unsafe { crate::serial_out(b'.'); }  // Use serial_out directly
         }
 
         // Just loop with heartbeat - input is disabled
-        for _ in 0..10000 {
+        for _ in 0..1000 {
             core::hint::spin_loop();
         }
 
