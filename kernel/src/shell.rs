@@ -222,6 +222,8 @@ pub fn x86_serial_console_sync() -> ! {
 
     fn write_byte(byte: u8) {
         unsafe {
+            // Add timeout to prevent infinite hang
+            let mut timeout = 100_000;
             loop {
                 let status: u8;
                 core::arch::asm!(
@@ -233,6 +235,11 @@ pub fn x86_serial_console_sync() -> ! {
                 if status & 0x20 != 0 {
                     break;
                 }
+                timeout -= 1;
+                if timeout == 0 {
+                    break; // Give up after timeout
+                }
+                core::hint::spin_loop();
             }
             core::arch::asm!(
                 "out dx, al",
@@ -271,19 +278,18 @@ pub fn x86_serial_console_sync() -> ! {
     unsafe { crate::serial_out(b'6'); }
 
     loop {
-        // Heartbeat every ~1 million iterations
+        // Heartbeat every ~100k iterations for faster visual feedback
         heartbeat_counter = heartbeat_counter.wrapping_add(1);
-        if heartbeat_counter % 1_000_000 == 0 {
+        if heartbeat_counter % 100_000 == 0 {
             write_byte(b'.');
         }
 
-        // Skip has_data check - it hangs. Just try to poll a non-blocking way
-        // Use a simple delay loop instead
-        for _ in 0..10000 {
+        // Small delay between status checks
+        for _ in 0..1000 {
             core::hint::spin_loop();
         }
 
-        // Try to check manually inline
+        // Inline status check - avoid function call overhead
         let data_available = unsafe {
             let status: u8;
             core::arch::asm!(
