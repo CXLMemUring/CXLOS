@@ -328,7 +328,9 @@ pub fn x86_serial_console_sync() -> ! {
 
     unsafe { crate::serial_out(b'6'); }
 
-    write_str("Interrupt-driven input enabled\r\n> ");
+    // Output prompt using simple write_byte to avoid corruption
+    write_byte(b'>');
+    write_byte(b' ');
 
     loop {
         // Check for input from interrupt buffer
@@ -345,30 +347,22 @@ pub fn x86_serial_console_sync() -> ! {
                     // Process command
                     let trimmed = line_buffer.trim();
                     if !trimmed.is_empty() {
-                        // Try built-in commands first
-                        let ctx = Context::new(trimmed);
-                        match handle_command(ctx, COMMANDS) {
-                            Ok(_) => {},
-                            Err(_e) => {
-                                // Try busybox commands
-                                let parts: alloc::vec::Vec<String> = trimmed.split_whitespace().map(|s| s.to_string()).collect();
-                                if !parts.is_empty() {
-                                    if let Some(impl_fn) = commands::get_command_impl(&parts[0]) {
-                                        let mut cmd_ctx = commands::CommandContext::new(parts);
-                                        match impl_fn.execute(&mut cmd_ctx) {
-                                            Ok(output) => write_str(&output),
-                                            Err(e) => write_str(&alloc::format!("Error: {}\n", e)),
-                                        }
-                                    } else {
-                                        write_str(&alloc::format!("Unknown command: {}\n", trimmed));
-                                    }
-                                }
-                            }
+                        // Just echo "CMD:" and the command for now
+                        // Avoid complex string operations that cause corruption
+                        write_byte(b'C');
+                        write_byte(b'M');
+                        write_byte(b'D');
+                        write_byte(b':');
+                        for b in trimmed.bytes() {
+                            write_byte(b);
                         }
+                        write_byte(b'\r');
+                        write_byte(b'\n');
                     }
 
                     line_buffer.clear();
-                    write_str("> ");
+                    write_byte(b'>');
+                    write_byte(b' ');
                 } else {
                     // Add to line buffer
                     line_buffer.push(ch as char);
