@@ -255,41 +255,17 @@ pub fn x86_serial_console_sync() -> ! {
 
     unsafe { crate::serial_out(b'6'); }
 
-    // Test if we can execute anything after marker 6
-    unsafe { crate::serial_out(b'A'); }
-
-    // Output marker every single iteration to test loop execution
-    let mut iter_count = 0u32;
-
-    unsafe { crate::serial_out(b'B'); }
-
     loop {
-        unsafe { crate::serial_out(b'C'); } // First thing in loop
-
-        iter_count = iter_count.wrapping_add(1);
-        unsafe { crate::serial_out(b'D'); } // After iter_count increment
-
-        if iter_count % 10 == 0 {
-            unsafe { crate::serial_out(b'L'); } // L for Loop
-        }
-        unsafe { crate::serial_out(b'E'); } // After iter_count check
-
-        // Heartbeat every ~100k iterations for faster visual feedback
+        // Heartbeat every ~100k iterations
         heartbeat_counter = heartbeat_counter.wrapping_add(1);
-        unsafe { crate::serial_out(b'F'); } // After heartbeat increment
-
         if heartbeat_counter % 100_000 == 0 {
-            unsafe { crate::serial_out(b'7'); } // Test if we reach here
             write_byte(b'.');
-            unsafe { crate::serial_out(b'8'); } // Test if write_byte completes
         }
-        unsafe { crate::serial_out(b'G'); } // After heartbeat check
 
-        // Longer delay to avoid overwhelming the serial port
+        // Small delay between iterations
         for _ in 0..10000 {
             core::hint::spin_loop();
         }
-        unsafe { crate::serial_out(b'H'); } // After spin loop
 
         // SKIP status check entirely - reading LINE_STATUS_REG hangs!
         // For now, just keep looping with heartbeat to prove loop works
