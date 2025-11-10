@@ -256,9 +256,9 @@ pub fn x86_serial_console_sync() -> ! {
     unsafe { crate::serial_out(b'6'); }
 
     loop {
-        // Heartbeat every ~100k iterations
+        // Heartbeat every ~500k iterations (slower to reduce clutter)
         heartbeat_counter = heartbeat_counter.wrapping_add(1);
-        if heartbeat_counter % 100_000 == 0 {
+        if heartbeat_counter % 500_000 == 0 {
             write_byte(b'.');
         }
 
@@ -282,8 +282,21 @@ pub fn x86_serial_console_sync() -> ! {
 
         // Filter out "no data" values and process valid ASCII
         if ch != 0xFF && ch != 0x00 && (ch >= 32 && ch < 127 || ch == b'\r' || ch == b'\n') {
+            // Debug: show hex value of character
+            write_byte(b'<');
+            let hex_hi = (ch >> 4) & 0x0F;
+            let hex_lo = ch & 0x0F;
+            write_byte(if hex_hi < 10 { b'0' + hex_hi } else { b'a' + hex_hi - 10 });
+            write_byte(if hex_lo < 10 { b'0' + hex_lo } else { b'a' + hex_lo - 10 });
+            write_byte(b'>');
+
             // Echo the character
             write_byte(ch);
+
+            // Add significant delay after reading to avoid re-reading same byte
+            for _ in 0..100_000 {
+                core::hint::spin_loop();
+            }
 
             if ch == b'\r' || ch == b'\n' {
                     write_byte(b'\r');
