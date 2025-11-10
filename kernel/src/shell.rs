@@ -252,7 +252,8 @@ pub fn x86_serial_console_sync() -> ! {
     unsafe { crate::serial_out(b'5'); }
 
     let mut heartbeat_counter = 0u32;
-    let mut last_raw_read = 0xFFu8;  // Track the raw byte we read last time
+    let mut last_raw_read = 0xFFu8;
+    let mut cooldown = 0u32;  // Cooldown counter after processing a character
 
     unsafe { crate::serial_out(b'6'); }
 
@@ -263,33 +264,40 @@ pub fn x86_serial_console_sync() -> ! {
             write_byte(b'.');
         }
 
+        // Decrease cooldown
+        if cooldown > 0 {
+            cooldown -= 1;
+        }
+
         // Small delay between iterations
-        for _ in 0..10000 {
+        for _ in 0..1000 {
             core::hint::spin_loop();
         }
 
+        // Skip if in cooldown period
+        if cooldown > 0 {
+            continue;
+        }
+
         // Skip status check entirely - read DATA register speculatively
-        // If no data available, we'll get 0xFF or 0x00, which we can filter
         let ch = unsafe {
             let data: u8;
             core::arch::asm!(
                 "in al, dx",
                 out("al") data,
-                in("dx") DATA_REG,  // Serial port data register
+                in("dx") DATA_REG,
                 options(nomem, preserves_flags)
             );
             data
         };
 
-        // Only process if:
-        // 1. The raw read changed from last iteration (new data arrived)
-        // 2. It's valid ASCII
+        // Only process if changed AND valid
         let is_valid = ch != 0xFF && ch != 0x00 && (ch >= 32 && ch < 127 || ch == b'\r' || ch == b'\n');
         let has_changed = ch != last_raw_read;
 
-        last_raw_read = ch;
-
         if has_changed && is_valid {
+            last_raw_read = ch;
+            cooldown = 50_000;  // Set cooldown after processing
 
             // Debug: show hex value of character
             write_byte(b'<');
