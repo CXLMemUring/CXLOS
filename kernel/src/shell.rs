@@ -267,56 +267,25 @@ pub fn x86_serial_console_sync() -> ! {
             core::hint::spin_loop();
         }
 
-        // Check if PS/2 keyboard hangs like serial port
-        write_byte(b'K'); // Marker before PS/2 check
-
-        // Try PS/2 keyboard instead of serial port input
-        // PS/2 keyboard controller: port 0x64 = status, port 0x60 = data
-        let data_available = unsafe {
-            let status: u8;
+        // Skip status check entirely - read DATA register speculatively
+        // If no data available, we'll get 0xFF or 0x00, which we can filter
+        let ch = unsafe {
+            let data: u8;
             core::arch::asm!(
                 "in al, dx",
-                out("al") status,
-                in("dx") 0x64u16,  // PS/2 status register
+                out("al") data,
+                in("dx") DATA_REG,  // Serial port data register
                 options(nomem, preserves_flags)
             );
-            status & 0x01 != 0  // Bit 0 = output buffer full (data available)
+            data
         };
 
-        write_byte(b'M'); // Marker after PS/2 check
+        // Filter out "no data" values and process valid ASCII
+        if ch != 0xFF && ch != 0x00 && (ch >= 32 && ch < 127 || ch == b'\r' || ch == b'\n') {
+            // Echo the character
+            write_byte(ch);
 
-        if data_available {
-            // Read from PS/2 data port
-            let scancode = unsafe {
-                let data: u8;
-                core::arch::asm!(
-                    "in al, dx",
-                    out("al") data,
-                    in("dx") 0x60u16,  // PS/2 data register
-                    options(nomem, preserves_flags)
-                );
-                data
-            };
-
-            // Simple scancode to ASCII conversion (US keyboard, make codes only)
-            let ch = match scancode {
-                0x1C => b'\n',  // Enter
-                0x39 => b' ',   // Space
-                0x1E => b'a', 0x30 => b'b', 0x2E => b'c', 0x20 => b'd',
-                0x12 => b'e', 0x21 => b'f', 0x22 => b'g', 0x23 => b'h',
-                0x17 => b'i', 0x24 => b'j', 0x25 => b'k', 0x26 => b'l',
-                0x32 => b'm', 0x31 => b'n', 0x18 => b'o', 0x19 => b'p',
-                0x10 => b'q', 0x13 => b'r', 0x1F => b's', 0x14 => b't',
-                0x16 => b'u', 0x2F => b'v', 0x11 => b'w', 0x2D => b'x',
-                0x15 => b'y', 0x2C => b'z',
-                _ => 0,  // Ignore other scancodes
-            };
-
-            if ch != 0 {
-                // Echo the character
-                write_byte(ch);
-
-                if ch == b'\n' {
+            if ch == b'\r' || ch == b'\n' {
                     write_byte(b'\r');
                     write_byte(b'\n');
 
@@ -347,10 +316,9 @@ pub fn x86_serial_console_sync() -> ! {
 
                     line_buffer.clear();
                     write_str("> ");
-                } else {
-                    // Add to line buffer
-                    line_buffer.push(ch as char);
-                }
+            } else {
+                // Add to line buffer
+                line_buffer.push(ch as char);
             }
         }
         // No else needed - just continue looping
