@@ -346,9 +346,9 @@ pub fn x86_serial_console_sync() -> ! {
                 line_buffer.push(ch as char);
                 write_byte(ch);
             }
-        } else {
-            unsafe { core::arch::asm!("hlt"); }
         }
+        // No else needed - just continue looping
+        // Previously had hlt here which froze the CPU!
     }
 }
 
