@@ -267,6 +267,9 @@ pub fn x86_serial_console_sync() -> ! {
             core::hint::spin_loop();
         }
 
+        // Check if PS/2 keyboard hangs like serial port
+        write_byte(b'K'); // Marker before PS/2 check
+
         // Try PS/2 keyboard instead of serial port input
         // PS/2 keyboard controller: port 0x64 = status, port 0x60 = data
         let data_available = unsafe {
@@ -279,6 +282,8 @@ pub fn x86_serial_console_sync() -> ! {
             );
             status & 0x01 != 0  // Bit 0 = output buffer full (data available)
         };
+
+        write_byte(b'M'); // Marker after PS/2 check
 
         if data_available {
             // Read from PS/2 data port
