@@ -262,22 +262,16 @@ pub fn x86_serial_console_sync() -> ! {
             write_byte(b'.');
         }
 
-        // Small delay between status checks
-        for _ in 0..1000 {
+        // Longer delay to avoid overwhelming the serial port
+        for _ in 0..10000 {
             core::hint::spin_loop();
         }
 
-        // Inline status check - avoid function call overhead
-        let data_available = unsafe {
-            let status: u8;
-            core::arch::asm!(
-                "in al, dx",
-                out("al") status,
-                in("dx") LINE_STATUS_REG,
-                options(nomem, preserves_flags)
-            );
-            status & 0x01 != 0
-        };
+        // SKIP status check entirely - reading LINE_STATUS_REG hangs!
+        // For now, just keep looping with heartbeat to prove loop works
+        // TODO: Find alternative way to detect input without reading status register
+
+        let data_available = false; // Temporarily disabled
 
         if data_available {
             write_byte(b'!'); // Signal we got data
