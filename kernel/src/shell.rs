@@ -251,6 +251,19 @@ pub fn x86_serial_console_sync() -> ! {
 
     unsafe { crate::serial_out(b'5'); }
 
+    // Try to initialize serial port FIFO to clear any stale data
+    // FCR (FIFO Control Register) = COM1_BASE + 2
+    const FIFO_CONTROL_REG: u16 = COM1_BASE + 2;
+    unsafe {
+        // Enable FIFO and clear both RX and TX FIFOs
+        core::arch::asm!(
+            "out dx, al",
+            in("al") 0x07u8,  // Enable FIFO (bit 0), Clear RX (bit 1), Clear TX (bit 2)
+            in("dx") FIFO_CONTROL_REG,
+            options(nomem, preserves_flags)
+        );
+    }
+
     let mut heartbeat_counter = 0u32;
     let mut last_raw_read = 0xFFu8;
     let mut cooldown = 0u32;  // Cooldown counter after processing a character
@@ -279,17 +292,25 @@ pub fn x86_serial_console_sync() -> ! {
             continue;
         }
 
-        // Skip status check entirely - read DATA register speculatively
-        let ch = unsafe {
-            let data: u8;
-            core::arch::asm!(
-                "in al, dx",
-                out("al") data,
-                in("dx") DATA_REG,
-                options(nomem, preserves_flags)
-            );
-            data
-        };
+        // Read DATA register multiple times to try to "consume" the FIFO
+        let mut ch = 0u8;
+        for _ in 0..3 {
+            ch = unsafe {
+                let data: u8;
+                core::arch::asm!(
+                    "in al, dx",
+                    out("al") data,
+                    in("dx") DATA_REG,
+                    options(nomem, preserves_flags)
+                );
+                data
+            };
+            // Small delay between reads
+            for _ in 0..100 {
+                core::hint::spin_loop();
+            }
+        }
+        // Use the last read value
 
         // Only process if changed AND valid
         let is_valid = ch != 0xFF && ch != 0x00 && (ch >= 32 && ch < 127 || ch == b'\r' || ch == b'\n');
@@ -297,7 +318,7 @@ pub fn x86_serial_console_sync() -> ! {
 
         if has_changed && is_valid {
             last_raw_read = ch;
-            cooldown = 50_000;  // Set cooldown after processing
+            cooldown = 100_000;  // Longer cooldown after processing
 
             // Debug: show hex value of character
             write_byte(b'<');
