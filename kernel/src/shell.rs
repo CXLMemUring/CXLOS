@@ -364,6 +364,10 @@ pub fn x86_serial_console_sync() -> ! {
     write_byte(b'>');
     write_byte(b' ');
 
+    // Test: manually poll IIR to see if interrupts are pending
+    const IIR_REG: u16 = COM1_BASE + 2;  // Interrupt Identification Register
+
+    let mut poll_count = 0u32;
     loop {
         // Check for input from interrupt buffer
         if let Some(ch) = try_read_serial() {
@@ -399,6 +403,41 @@ pub fn x86_serial_console_sync() -> ! {
                     // Add to line buffer
                     line_buffer.push(ch as char);
                 }
+            }
+        }
+
+        // Manually check IIR every 100k iterations as fallback
+        poll_count = poll_count.wrapping_add(1);
+        if poll_count % 100_000 == 0 {
+            let iir = unsafe {
+                let val: u8;
+                core::arch::asm!(
+                    "in al, dx",
+                    out("al") val,
+                    in("dx") IIR_REG,
+                    options(nomem, preserves_flags)
+                );
+                val
+            };
+
+            // If bit 0 is clear, there's a pending interrupt
+            if (iir & 0x01) == 0 {
+                unsafe { crate::serial_out(b'?'); }  // Mark that IIR shows pending interrupt
+
+                // Manually read the data
+                let ch = unsafe {
+                    let data: u8;
+                    core::arch::asm!(
+                        "in al, dx",
+                        out("al") data,
+                        in("dx") DATA_REG,
+                        options(nomem, preserves_flags)
+                    );
+                    data
+                };
+
+                // Put it in the buffer
+                on_serial_interrupt(ch);
             }
         }
 
