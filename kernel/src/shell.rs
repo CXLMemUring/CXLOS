@@ -406,10 +406,11 @@ pub fn x86_serial_console_sync() -> ! {
             }
         }
 
-        // Manually check IIR every 100k iterations as fallback
+        // Fallback: Just read DATA_REG directly and check if changed
         poll_count = poll_count.wrapping_add(1);
-        if poll_count % 100_000 == 0 {
-            let iir = unsafe {
+        if poll_count % 50_000 == 0 {
+            // Read IIR first (acts as a "barrier")
+            let _iir = unsafe {
                 let val: u8;
                 core::arch::asm!(
                     "in al, dx",
@@ -420,23 +421,23 @@ pub fn x86_serial_console_sync() -> ! {
                 val
             };
 
-            // If bit 0 is clear, there's a pending interrupt
-            if (iir & 0x01) == 0 {
-                unsafe { crate::serial_out(b'?'); }  // Mark that IIR shows pending interrupt
+            // Now read DATA_REG
+            let ch = unsafe {
+                let data: u8;
+                core::arch::asm!(
+                    "in al, dx",
+                    out("al") data,
+                    in("dx") DATA_REG,
+                    options(nomem, preserves_flags)
+                );
+                data
+            };
 
-                // Manually read the data
-                let ch = unsafe {
-                    let data: u8;
-                    core::arch::asm!(
-                        "in al, dx",
-                        out("al") data,
-                        in("dx") DATA_REG,
-                        options(nomem, preserves_flags)
-                    );
-                    data
-                };
-
-                // Put it in the buffer
+            // Check if it's a valid, new character
+            static mut LAST_READ: u8 = 0xFF;
+            if ch != unsafe { LAST_READ } && ch != 0xFF && ch != 0x00 && (ch >= 32 && ch < 127 || ch == b'\r' || ch == b'\n') {
+                unsafe { LAST_READ = ch; }
+                unsafe { crate::serial_out(b'?'); }  // Mark detection
                 on_serial_interrupt(ch);
             }
         }
