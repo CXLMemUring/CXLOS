@@ -97,7 +97,6 @@ pub fn spawn(
               "-object","memory-backend-file,id=cxl-mem1,share=on,mem-path=/tmp/cxltest1.raw,size=256M",
               "-object","memory-backend-file,id=cxl-lsa1,share=on,mem-path=/tmp/lsa1.raw,size=256M",
               "-M", "cxl-fmw.0.targets.0=cxl.1,cxl-fmw.0.size=4G",
-              "-nographic",
                 "-kernel",
                 image.to_str().unwrap(), // target/x86_64-unknown-none/debug/loader
             ]);

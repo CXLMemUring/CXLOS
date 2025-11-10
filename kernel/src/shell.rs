@@ -288,6 +288,80 @@ pub fn x86_serial_console_sync() -> ! {
 
     unsafe { crate::serial_out(b'5'); }
 
+    // Completely reinitialize COM1 from scratch
+    const INTERRUPT_ENABLE_REG: u16 = COM1_BASE + 1;  // IER
+    const FIFO_CONTROL_REG: u16 = COM1_BASE + 2;      // FCR
+    const LCR_REG: u16 = COM1_BASE + 3;               // Line Control Register
+    const MCR_REG: u16 = COM1_BASE + 4;               // Modem Control Register
+    const DIVISOR_LOW: u16 = COM1_BASE + 0;
+    const DIVISOR_HIGH: u16 = COM1_BASE + 1;
+
+    unsafe {
+        // Disable all interrupts first
+        core::arch::asm!(
+            "out dx, al",
+            in("al") 0x00u8,
+            in("dx") INTERRUPT_ENABLE_REG,
+            options(nomem, preserves_flags)
+        );
+
+        // Enable DLAB (Divisor Latch Access Bit) to set baud rate
+        core::arch::asm!(
+            "out dx, al",
+            in("al") 0x80u8,  // DLAB = 1
+            in("dx") LCR_REG,
+            options(nomem, preserves_flags)
+        );
+
+        // Set baud rate divisor to 1 (115200 baud)
+        core::arch::asm!(
+            "out dx, al",
+            in("al") 0x01u8,  // Divisor low byte
+            in("dx") DIVISOR_LOW,
+            options(nomem, preserves_flags)
+        );
+        core::arch::asm!(
+            "out dx, al",
+            in("al") 0x00u8,  // Divisor high byte
+            in("dx") DIVISOR_HIGH,
+            options(nomem, preserves_flags)
+        );
+
+        // 8 bits, no parity, 1 stop bit, DLAB = 0
+        core::arch::asm!(
+            "out dx, al",
+            in("al") 0x03u8,
+            in("dx") LCR_REG,
+            options(nomem, preserves_flags)
+        );
+
+        // Enable FIFO, clear RX/TX, 14-byte threshold
+        core::arch::asm!(
+            "out dx, al",
+            in("al") 0xC7u8,
+            in("dx") FIFO_CONTROL_REG,
+            options(nomem, preserves_flags)
+        );
+
+        // Enable DTR, RTS, and OUT2 (required for interrupts)
+        core::arch::asm!(
+            "out dx, al",
+            in("al") 0x0Bu8,  // DTR=1, RTS=1, OUT2=1, OUT1=0
+            in("dx") MCR_REG,
+            options(nomem, preserves_flags)
+        );
+
+        // Now enable RX interrupt
+        core::arch::asm!(
+            "out dx, al",
+            in("al") 0x01u8,  // Enable RX interrupt
+            in("dx") INTERRUPT_ENABLE_REG,
+            options(nomem, preserves_flags)
+        );
+    }
+
+    unsafe { crate::serial_out(b'U'); }  // UART reinitialized
+
     // Initialize PIC (Programmable Interrupt Controller)
     unsafe {
         // ICW1: Initialize PIC
@@ -312,34 +386,6 @@ pub fn x86_serial_console_sync() -> ! {
     }
 
     unsafe { crate::serial_out(b'P'); } // PIC initialized
-
-    // Enable serial port interrupts
-    // IER (Interrupt Enable Register) = COM1_BASE + 1
-    const INTERRUPT_ENABLE_REG: u16 = COM1_BASE + 1;
-    unsafe {
-        // Enable "Received Data Available" interrupt (bit 0)
-        core::arch::asm!(
-            "out dx, al",
-            in("al") 0x01u8,  // Enable RX interrupt
-            in("dx") INTERRUPT_ENABLE_REG,
-            options(nomem, preserves_flags)
-        );
-    }
-
-    // Try to initialize serial port FIFO to clear any stale data
-    // FCR (FIFO Control Register) = COM1_BASE + 2
-    const FIFO_CONTROL_REG: u16 = COM1_BASE + 2;
-    unsafe {
-        // Enable FIFO and clear both RX and TX FIFOs
-        core::arch::asm!(
-            "out dx, al",
-            in("al") 0x07u8,  // Enable FIFO (bit 0), Clear RX (bit 1), Clear TX (bit 2)
-            in("dx") FIFO_CONTROL_REG,
-            options(nomem, preserves_flags)
-        );
-    }
-
-    unsafe { crate::serial_out(b'I'); } // Serial interrupt enabled
 
     // Enable CPU interrupts with STI
     unsafe {
