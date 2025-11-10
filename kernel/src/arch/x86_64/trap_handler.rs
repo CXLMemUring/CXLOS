@@ -524,6 +524,16 @@ fn handle_irq(irq: u64) {
 fn handle_serial_irq() {
     const COM1_DATA: u16 = 0x3F8;
 
+    // Output marker to show interrupt was triggered
+    unsafe {
+        asm!(
+            "mov dx, 0x3F8",
+            "mov al, 0x21",  // '!'
+            "out dx, al",
+            options(nomem, nostack)
+        );
+    }
+
     // Read the character from serial port
     let ch = unsafe {
         let mut data: u8;
@@ -535,6 +545,16 @@ fn handle_serial_irq() {
         );
         data
     };
+
+    // Output the character we read
+    unsafe {
+        asm!(
+            "mov dx, 0x3F8",
+            "out dx, al",
+            in("al") ch,
+            options(nomem, nostack)
+        );
+    }
 
     // Call shell's serial input handler
     crate::shell::on_serial_interrupt(ch);
