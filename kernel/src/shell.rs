@@ -259,7 +259,9 @@ pub fn x86_serial_console_sync() -> ! {
         // Heartbeat every ~100k iterations for faster visual feedback
         heartbeat_counter = heartbeat_counter.wrapping_add(1);
         if heartbeat_counter % 100_000 == 0 {
+            unsafe { crate::serial_out(b'7'); } // Test if we reach here
             write_byte(b'.');
+            unsafe { crate::serial_out(b'8'); } // Test if write_byte completes
         }
 
         // Longer delay to avoid overwhelming the serial port
