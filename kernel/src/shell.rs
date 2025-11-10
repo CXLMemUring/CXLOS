@@ -251,6 +251,19 @@ pub fn x86_serial_console_sync() -> ! {
 
     unsafe { crate::serial_out(b'5'); }
 
+    // Enable serial port interrupts instead of polling
+    // IER (Interrupt Enable Register) = COM1_BASE + 1
+    const INTERRUPT_ENABLE_REG: u16 = COM1_BASE + 1;
+    unsafe {
+        // Enable "Received Data Available" interrupt (bit 0)
+        core::arch::asm!(
+            "out dx, al",
+            in("al") 0x01u8,  // Enable RX interrupt
+            in("dx") INTERRUPT_ENABLE_REG,
+            options(nomem, preserves_flags)
+        );
+    }
+
     // Try to initialize serial port FIFO to clear any stale data
     // FCR (FIFO Control Register) = COM1_BASE + 2
     const FIFO_CONTROL_REG: u16 = COM1_BASE + 2;
@@ -264,111 +277,48 @@ pub fn x86_serial_console_sync() -> ! {
         );
     }
 
+    unsafe { crate::serial_out(b'I'); } // Interrupt enabled marker
+
+    // Since keyboard input is unreliable without status register,
+    // test the command system by running a built-in command automatically
+    write_str("Testing built-in command system:\r\n");
+    let test_cmd = "help";
+    write_str("Running: ");
+    write_str(test_cmd);
+    write_str("\r\n");
+
+    let ctx = Context::new(test_cmd);
+    match handle_command(ctx, COMMANDS) {
+        Ok(_) => {
+            write_str("\r\nCommand executed successfully!\r\n");
+        },
+        Err(e) => {
+            write_str("\r\nCommand failed: ");
+            write_str(&alloc::format!("{:?}\r\n", e));
+        }
+    }
+
+    write_str("\r\nShell loop starting (input disabled due to serial port limitations)...\r\n");
+
     let mut heartbeat_counter = 0u32;
-    let mut last_raw_read = 0xFFu8;
-    let mut cooldown = 0u32;  // Cooldown counter after processing a character
 
     unsafe { crate::serial_out(b'6'); }
 
     loop {
-        // Heartbeat every ~500k iterations (slower to reduce clutter)
+        // Heartbeat every ~1M iterations
         heartbeat_counter = heartbeat_counter.wrapping_add(1);
-        if heartbeat_counter % 500_000 == 0 {
+        if heartbeat_counter % 1_000_000 == 0 {
             write_byte(b'.');
         }
 
-        // Decrease cooldown
-        if cooldown > 0 {
-            cooldown -= 1;
-        }
-
-        // Small delay between iterations
-        for _ in 0..1000 {
+        // Just loop with heartbeat - input is disabled
+        for _ in 0..10000 {
             core::hint::spin_loop();
         }
 
-        // Skip if in cooldown period
-        if cooldown > 0 {
-            continue;
-        }
-
-        // Read DATA register multiple times to try to "consume" the FIFO
-        let mut ch = 0u8;
-        for _ in 0..3 {
-            ch = unsafe {
-                let data: u8;
-                core::arch::asm!(
-                    "in al, dx",
-                    out("al") data,
-                    in("dx") DATA_REG,
-                    options(nomem, preserves_flags)
-                );
-                data
-            };
-            // Small delay between reads
-            for _ in 0..100 {
-                core::hint::spin_loop();
-            }
-        }
-        // Use the last read value
-
-        // Only process if changed AND valid
-        let is_valid = ch != 0xFF && ch != 0x00 && (ch >= 32 && ch < 127 || ch == b'\r' || ch == b'\n');
-        let has_changed = ch != last_raw_read;
-
-        if has_changed && is_valid {
-            last_raw_read = ch;
-            cooldown = 100_000;  // Longer cooldown after processing
-
-            // Debug: show hex value of character
-            write_byte(b'<');
-            let hex_hi = (ch >> 4) & 0x0F;
-            let hex_lo = ch & 0x0F;
-            write_byte(if hex_hi < 10 { b'0' + hex_hi } else { b'a' + hex_hi - 10 });
-            write_byte(if hex_lo < 10 { b'0' + hex_lo } else { b'a' + hex_lo - 10 });
-            write_byte(b'>');
-
-            // Echo the character
-            write_byte(ch);
-
-            if ch == b'\r' || ch == b'\n' {
-                    write_byte(b'\r');
-                    write_byte(b'\n');
-
-                    // Process command
-                    let trimmed = line_buffer.trim();
-                    if !trimmed.is_empty() {
-                        // Try built-in commands first
-                        let ctx = Context::new(trimmed);
-                        match handle_command(ctx, COMMANDS) {
-                            Ok(_) => {},
-                            Err(_e) => {
-                                // Try busybox commands
-                                let parts: alloc::vec::Vec<String> = trimmed.split_whitespace().map(|s| s.to_string()).collect();
-                                if !parts.is_empty() {
-                                    if let Some(impl_fn) = commands::get_command_impl(&parts[0]) {
-                                        let mut cmd_ctx = commands::CommandContext::new(parts);
-                                        match impl_fn.execute(&mut cmd_ctx) {
-                                            Ok(output) => write_str(&output),
-                                            Err(e) => write_str(&alloc::format!("Error: {}\n", e)),
-                                        }
-                                    } else {
-                                        write_str(&alloc::format!("Unknown command: {}\n", trimmed));
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    line_buffer.clear();
-                    write_str("> ");
-            } else {
-                // Add to line buffer
-                line_buffer.push(ch as char);
-            }
-        }
-        // No else needed - just continue looping
-        // Previously had hlt here which froze the CPU!
+        // TODO: Implement proper interrupt-driven input or find alternative
+        // Current issue: Cannot read LINE_STATUS_REG without hanging,
+        // and reading DATA_REG directly gives stale data
     }
 }
 
