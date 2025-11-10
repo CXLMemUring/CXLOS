@@ -255,9 +255,16 @@ pub fn x86_serial_console_sync() -> ! {
 
     unsafe { crate::serial_out(b'6'); }
 
+    // Test if we can execute anything after marker 6
+    unsafe { crate::serial_out(b'A'); }
+
     // Output marker every single iteration to test loop execution
     let mut iter_count = 0u32;
+
+    unsafe { crate::serial_out(b'B'); }
+
     loop {
+        unsafe { crate::serial_out(b'C'); } // First thing in loop
         iter_count = iter_count.wrapping_add(1);
         if iter_count % 10 == 0 {
             unsafe { crate::serial_out(b'L'); } // L for Loop
