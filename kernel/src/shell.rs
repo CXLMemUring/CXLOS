@@ -267,60 +267,85 @@ pub fn x86_serial_console_sync() -> ! {
             core::hint::spin_loop();
         }
 
-        // SKIP status check entirely - reading LINE_STATUS_REG hangs!
-        // For now, just keep looping with heartbeat to prove loop works
-        // TODO: Find alternative way to detect input without reading status register
-
-        let data_available = false; // Temporarily disabled
+        // Try PS/2 keyboard instead of serial port input
+        // PS/2 keyboard controller: port 0x64 = status, port 0x60 = data
+        let data_available = unsafe {
+            let status: u8;
+            core::arch::asm!(
+                "in al, dx",
+                out("al") status,
+                in("dx") 0x64u16,  // PS/2 status register
+                options(nomem, preserves_flags)
+            );
+            status & 0x01 != 0  // Bit 0 = output buffer full (data available)
+        };
 
         if data_available {
-            write_byte(b'!'); // Signal we got data
-            let ch = read_byte();
-            write_byte(b'[');
-            write_byte(ch);
-            write_byte(b']');
+            // Read from PS/2 data port
+            let scancode = unsafe {
+                let data: u8;
+                core::arch::asm!(
+                    "in al, dx",
+                    out("al") data,
+                    in("dx") 0x60u16,  // PS/2 data register
+                    options(nomem, preserves_flags)
+                );
+                data
+            };
 
-            if ch == b'\r' || ch == b'\n' {
-                write_byte(b'\r');
-                write_byte(b'\n');
+            // Simple scancode to ASCII conversion (US keyboard, make codes only)
+            let ch = match scancode {
+                0x1C => b'\n',  // Enter
+                0x39 => b' ',   // Space
+                0x1E => b'a', 0x30 => b'b', 0x2E => b'c', 0x20 => b'd',
+                0x12 => b'e', 0x21 => b'f', 0x22 => b'g', 0x23 => b'h',
+                0x17 => b'i', 0x24 => b'j', 0x25 => b'k', 0x26 => b'l',
+                0x32 => b'm', 0x31 => b'n', 0x18 => b'o', 0x19 => b'p',
+                0x10 => b'q', 0x13 => b'r', 0x1F => b's', 0x14 => b't',
+                0x16 => b'u', 0x2F => b'v', 0x11 => b'w', 0x2D => b'x',
+                0x15 => b'y', 0x2C => b'z',
+                _ => 0,  // Ignore other scancodes
+            };
 
-                // Process command
-                let trimmed = line_buffer.trim();
-                if !trimmed.is_empty() {
-                    // Try built-in commands first
-                    let ctx = Context::new(trimmed);
-                    match handle_command(ctx, COMMANDS) {
-                        Ok(_) => {},
-                        Err(_e) => {
-                            // Try busybox commands
-                            let parts: alloc::vec::Vec<String> = trimmed.split_whitespace().map(|s| s.to_string()).collect();
-                            if !parts.is_empty() {
-                                if let Some(impl_fn) = commands::get_command_impl(&parts[0]) {
-                                    let mut cmd_ctx = commands::CommandContext::new(parts);
-                                    match impl_fn.execute(&mut cmd_ctx) {
-                                        Ok(output) => write_str(&output),
-                                        Err(e) => write_str(&alloc::format!("Error: {}\n", e)),
+            if ch != 0 {
+                // Echo the character
+                write_byte(ch);
+
+                if ch == b'\n' {
+                    write_byte(b'\r');
+                    write_byte(b'\n');
+
+                    // Process command
+                    let trimmed = line_buffer.trim();
+                    if !trimmed.is_empty() {
+                        // Try built-in commands first
+                        let ctx = Context::new(trimmed);
+                        match handle_command(ctx, COMMANDS) {
+                            Ok(_) => {},
+                            Err(_e) => {
+                                // Try busybox commands
+                                let parts: alloc::vec::Vec<String> = trimmed.split_whitespace().map(|s| s.to_string()).collect();
+                                if !parts.is_empty() {
+                                    if let Some(impl_fn) = commands::get_command_impl(&parts[0]) {
+                                        let mut cmd_ctx = commands::CommandContext::new(parts);
+                                        match impl_fn.execute(&mut cmd_ctx) {
+                                            Ok(output) => write_str(&output),
+                                            Err(e) => write_str(&alloc::format!("Error: {}\n", e)),
+                                        }
+                                    } else {
+                                        write_str(&alloc::format!("Unknown command: {}\n", trimmed));
                                     }
-                                } else {
-                                    write_str(&alloc::format!("Unknown command: {}\n", trimmed));
                                 }
                             }
                         }
                     }
-                }
 
-                line_buffer.clear();
-                write_str("> ");
-            } else if ch == 127 || ch == 8 {
-                if !line_buffer.is_empty() {
-                    line_buffer.pop();
-                    write_byte(8);
-                    write_byte(b' ');
-                    write_byte(8);
+                    line_buffer.clear();
+                    write_str("> ");
+                } else {
+                    // Add to line buffer
+                    line_buffer.push(ch as char);
                 }
-            } else if ch >= 32 && ch < 127 {
-                line_buffer.push(ch as char);
-                write_byte(ch);
             }
         }
         // No else needed - just continue looping
