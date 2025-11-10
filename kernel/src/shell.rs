@@ -255,7 +255,14 @@ pub fn x86_serial_console_sync() -> ! {
 
     unsafe { crate::serial_out(b'6'); }
 
+    // Output marker every single iteration to test loop execution
+    let mut iter_count = 0u32;
     loop {
+        iter_count = iter_count.wrapping_add(1);
+        if iter_count % 10 == 0 {
+            unsafe { crate::serial_out(b'L'); } // L for Loop
+        }
+
         // Heartbeat every ~100k iterations for faster visual feedback
         heartbeat_counter = heartbeat_counter.wrapping_add(1);
         if heartbeat_counter % 100_000 == 0 {
