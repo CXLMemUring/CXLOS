@@ -221,32 +221,10 @@ pub fn x86_serial_console_sync() -> ! {
     }
 
     fn write_byte(byte: u8) {
+        // Use the known-working serial_out from main.rs
+        // Avoid all status checks which cause hangs
         unsafe {
-            // Add timeout to prevent infinite hang
-            let mut timeout = 100_000;
-            loop {
-                let status: u8;
-                core::arch::asm!(
-                    "in al, dx",
-                    out("al") status,
-                    in("dx") LINE_STATUS_REG,
-                    options(nomem, preserves_flags)
-                );
-                if status & 0x20 != 0 {
-                    break;
-                }
-                timeout -= 1;
-                if timeout == 0 {
-                    break; // Give up after timeout
-                }
-                core::hint::spin_loop();
-            }
-            core::arch::asm!(
-                "out dx, al",
-                in("al") byte,
-                in("dx") DATA_REG,
-                options(nomem, preserves_flags)
-            );
+            crate::serial_out(byte);
         }
     }
 
