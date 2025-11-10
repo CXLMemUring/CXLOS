@@ -83,6 +83,8 @@ pub fn spawn(
             cmd.args([
                 "-serial",
                 "stdio",
+                "-vga",
+                "std",
                 "-monitor",
                 "none",
                 "-no-shutdown",

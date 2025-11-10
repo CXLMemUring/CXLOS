@@ -697,6 +697,76 @@ pub async fn x86_serial_console() -> ! {
     }
 }
 
+/// VGA + PS/2 keyboard shell (replacement for failed serial input)
+#[cfg(target_arch = "x86_64")]
+pub fn x86_vga_console_sync() -> ! {
+    use alloc::string::String;
+
+    // Initialize VGA text mode
+    crate::vga::init();
+
+    // Print banner to VGA
+    crate::vga::write_string(S);
+    crate::vga::write_string("type `help` to list available commands\n");
+    crate::vga::write_string("> ");
+
+    let mut line_buffer = String::new();
+    let mut shift_pressed = false;
+
+    loop {
+        // Poll PS/2 keyboard for scancodes
+        if let Some(scancode) = crate::ps2_keyboard::try_read_scancode() {
+            // Handle shift key state
+            if crate::ps2_keyboard::is_shift_pressed(scancode) {
+                shift_pressed = true;
+                continue;
+            }
+            if crate::ps2_keyboard::is_shift_released(scancode) {
+                shift_pressed = false;
+                continue;
+            }
+
+            // Convert scancode to ASCII
+            if let Some(ch) = crate::ps2_keyboard::scancode_to_ascii(scancode, shift_pressed) {
+                match ch {
+                    '\n' => {
+                        // Enter key - process command
+                        crate::vga::write_byte(b'\n');
+
+                        if !line_buffer.is_empty() {
+                            eval(&line_buffer);
+                            line_buffer.clear();
+                        }
+
+                        crate::vga::write_string("> ");
+                    }
+                    '\x08' => {
+                        // Backspace
+                        if !line_buffer.is_empty() {
+                            line_buffer.pop();
+                            let mut writer = crate::vga::Writer::new();
+                            writer.backspace();
+                        }
+                    }
+                    ch if ch >= ' ' && ch <= '~' => {
+                        // Printable character
+                        line_buffer.push(ch);
+                        crate::vga::write_byte(ch as u8);
+                    }
+                    _ => {
+                        // Ignore other characters
+                    }
+                }
+            }
+        }
+
+        // Small delay to avoid pegging CPU
+        for _ in 0..1000 {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 pub fn eval(line: &str) {
     if line == "help" {
         // Non-x86_64: use tracing
@@ -710,20 +780,21 @@ pub fn eval(line: &str) {
             tracing::info!(target: "shell", "  or run any busybox command directly (e.g., echo, pwd, uname)");
         }
 
-        // x86_64: print directly to serial; avoid tracing to prevent hangs
+        // x86_64: print directly to VGA
         #[cfg(target_arch = "x86_64")]
         {
-            serial_write_line_blocking("available commands:");
+            crate::vga::write_string("available commands:\n");
             for cmd in COMMANDS {
                 use core::fmt::Write;
                 let mut buf = alloc::string::String::new();
                 let _ = write!(&mut buf, "  {}", cmd);
-                serial_write_line_blocking(&buf);
+                crate::vga::write_string(&buf);
+                crate::vga::write_byte(b'\n');
             }
-            serial_write_line_blocking("");
-            serial_write_line_blocking("BusyBox commands:");
-            serial_write_line_blocking("  busybox --- list all busybox commands");
-            serial_write_line_blocking("  or run any busybox command directly (e.g., echo, pwd, uname)");
+            crate::vga::write_byte(b'\n');
+            crate::vga::write_string("BusyBox commands:\n");
+            crate::vga::write_string("  busybox --- list all busybox commands\n");
+            crate::vga::write_string("  or run any busybox command directly (e.g., echo, pwd, uname)\n");
         }
         return;
     }
@@ -737,15 +808,16 @@ pub fn eval(line: &str) {
                 tracing::info!(target: "shell", "  {} --- {}", cmd.name, cmd.description);
             }
         }
-        // x86_64: mirror list to serial only
+        // x86_64: output to VGA
         #[cfg(target_arch = "x86_64")]
         {
-            serial_write_line_blocking("BusyBox v1.36.1 commands:");
+            crate::vga::write_string("BusyBox v1.36.1 commands:\n");
             for cmd in busybox::BUSYBOX_COMMANDS {
                 use core::fmt::Write;
                 let mut buf = alloc::string::String::new();
                 let _ = write!(&mut buf, "  {} --- {}", cmd.name, cmd.description);
-                serial_write_line_blocking(&buf);
+                crate::vga::write_string(&buf);
+                crate::vga::write_byte(b'\n');
             }
         }
         return;
@@ -775,11 +847,9 @@ pub fn eval(line: &str) {
                         }
                         #[cfg(target_arch = "x86_64")]
                         {
-                            if output.ends_with('\n') {
-                                // already terminated
-                                serial_write_str_blocking(&output);
-                            } else {
-                                serial_write_line_blocking(&output);
+                            crate::vga::write_string(&output);
+                            if !output.ends_with('\n') {
+                                crate::vga::write_byte(b'\n');
                             }
                         }
                     }
@@ -795,7 +865,8 @@ pub fn eval(line: &str) {
                         use core::fmt::Write;
                         let mut buf = alloc::string::String::new();
                         let _ = write!(&mut buf, "{}: {}", ctx.args[0], e);
-                        serial_write_line_blocking(&buf);
+                        crate::vga::write_string(&buf);
+                        crate::vga::write_byte(b'\n');
                     }
                     return;
                 }

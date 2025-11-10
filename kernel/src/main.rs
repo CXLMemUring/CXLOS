@@ -44,6 +44,10 @@ mod state;
 mod tests;
 mod tracing;
 mod util;
+#[cfg(target_arch = "x86_64")]
+mod vga;
+#[cfg(target_arch = "x86_64")]
+mod ps2_keyboard;
 mod wasm;
 
 use core::range::Range;
@@ -648,25 +652,13 @@ fn kmain(cpuid: usize, boot_info_ptr: *const BootInfo, boot_ticks: u64) {
     #[cfg(target_arch = "x86_64")]
     unsafe { crate::serial_out(b'['); crate::serial_out(b'S'); crate::serial_out(b'Y'); crate::serial_out(b'N'); crate::serial_out(b'C'); crate::serial_out(b']'); }
 
-    // x86_64: Use synchronous shell to avoid Worker/async complications
+    // x86_64: Use VGA + PS/2 keyboard shell
     #[cfg(target_arch = "x86_64")]
     {
-        unsafe { crate::serial_out(b'1'); }
+        unsafe { crate::serial_out(b'V'); crate::serial_out(b'G'); crate::serial_out(b'A'); }
 
-        // TODO: Skip WASM busybox for now - it may hang during initialization
-        // let _ = busybox::wasm_loader::try_init_wasm_busybox();
-
-        unsafe { crate::serial_out(b'2'); }
-        unsafe { crate::serial_out(b'<'); crate::serial_out(b'i'); crate::serial_out(b'n'); crate::serial_out(b'i'); crate::serial_out(b't'); crate::serial_out(b'>'); }
-
-        // Initialize COM1 and print banner
-        shell::init_x86(&global.executor, 1);
-
-        unsafe { crate::serial_out(b'3'); }
-        unsafe { crate::serial_out(b'<'); crate::serial_out(b'r'); crate::serial_out(b'u'); crate::serial_out(b'n'); crate::serial_out(b'>'); }
-
-        // Run the blocking synchronous shell
-        shell::x86_serial_console_sync();
+        // Run the VGA + PS/2 keyboard shell (never returns)
+        shell::x86_vga_console_sync();
     }
 
     // For other architectures, use async worker
